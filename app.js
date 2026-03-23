@@ -1,0 +1,1240 @@
+// Constants & Logic for V7
+const HUBS = ['BCN', 'MAD', 'FRA', 'CDG', 'LHR', 'AMS', 'IST', 'JFK', 'DEL', 'KUL', 'BKK', 'SYD'];
+const EU_HUBS = ['BCN', 'MAD', 'FRA', 'CDG', 'AMS'];
+const PHASES = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Export Customs', 'Linehaul', 'Import Customs', 'Dest Hub', 'Dest SC', 'Out for Delivery', 'Delivered', 'Exception'];
+const TIMELINE_PHASES = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Export Customs', 'Linehaul', 'Import Customs', 'Dest Hub', 'Dest SC', 'Out for Delivery', 'Delivered'];
+const PRODUCT_TYPES = ['Next Day', 'Standard', 'Economy', 'Returns'];
+const CUSTOMERS = ['Amazon', 'Zalando', 'Asos', 'Inditex', 'H&M', 'Nike', 'Adidas', 'Shein'];
+const EXCEPTION_CAUSES = ['Bad Address', 'Customer Not Home', 'Weather Delay', 'Customs Hold', 'Damaged in Transit', 'Pick up not successful', 'Network Delay'];
+const PHASE_ICONS = { 'Manifested': '📋', 'Pick Up': '📍', 'Origin SC': '🏢', 'Origin Hub': '🏭', 'Export Customs': '🛃', 'Linehaul': '🚛', 'Import Customs': '🛃', 'Dest Hub': '🏭', 'Dest SC': '🏢', 'Out for Delivery': '🚚', 'Delivered': '📦', 'Exception': '⚠️' };
+const EDD_BUCKETS_ORDER = ["s4+ or more", "-3", "-2", "Yesterday", "Today", "Tomorrow", "+2", "+3", "4+ or more"];
+const SCAN_AGING_ORDER_DAYS = ["Today", "Yesterday", "D-2", "D-3", "D-4", "D-5+"]; 
+
+const START_PARCEL_COUNT = 8000;
+let shipments = [];
+let state = { filterScope: 'All', filters: {}, timer: 120, lastUpdated: new Date(), role: 'admin', roleEntity: null, roleDirection: 'both' };
+
+function randomChoice(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+function randomInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function getMidnight(date) { const d = new Date(date); d.setHours(0,0,0,0); return d.getTime(); }
+
+function getEDDBucket(timestamp) {
+    const dayOffset = Math.ceil((getMidnight(timestamp) - getMidnight(Date.now())) / 86400000);
+    if (dayOffset <= -4) return "s4+ or more"; if (dayOffset === -3) return "-3";
+    if (dayOffset === -2) return "-2"; if (dayOffset === -1) return "Yesterday";
+    if (dayOffset === 0) return "Today"; if (dayOffset === 1) return "Tomorrow";
+    if (dayOffset === 2) return "+2"; if (dayOffset === 3) return "+3";
+    return "4+ or more";
+}
+function getScanAgingBucket(timestamp) {
+    return Math.ceil((getMidnight(Date.now()) - getMidnight(timestamp)) / 86400000);
+}
+function getStatusForAge(ageStr) {
+    if (ageStr === "D-5+" || ageStr === "D-4") return "Critical";
+    if (ageStr === "D-3" || ageStr === "D-2") return "Warning";
+    return "Normal";
+}
+function getScanGroupDay(dayOffset) {
+    if (dayOffset >= 5) return "D-5+"; if (dayOffset === 4) return "D-4";
+    if (dayOffset === 3) return "D-3"; if (dayOffset === 2) return "D-2";
+    if (dayOffset === 1) return "Yesterday";
+    return "Today";
+}
+function generateShipment() {
+    const origin_hub = randomChoice(HUBS); const dest_hub = randomChoice(HUBS);
+    const origin_sc = origin_hub + '-SC' + randomInt(1, 3); const dest_sc = dest_hub + '-SC' + randomInt(1, 3);
+    const is_domestic = origin_hub === dest_hub;
+    const is_inner_eu = !is_domestic && EU_HUBS.includes(origin_hub) && EU_HUBS.includes(dest_hub);
+    const is_cross_border = !is_domestic && !is_inner_eu; 
+
+    let sla_hours, ctd_hours;
+    if (is_domestic) {
+        sla_hours = randomInt(24, 48);
+        ctd_hours = randomChoice([32, 35, 38, 40]);
+    } else if (is_inner_eu) {
+        sla_hours = randomInt(48, 72);
+        ctd_hours = randomChoice([50, 55, 60, 65]);
+    } else {
+        sla_hours = randomInt(72, 192);
+        ctd_hours = randomChoice([80, 100, 120, 150]);
+    }
+
+    const now = Date.now();
+    const isPending = Math.random() < 0.40; 
+    const isException = Math.random() < 0.04;
+    
+    let manifested_time, edd_timestamp, current_phase;
+
+    if (!isPending) {
+        let delivered_time = now - (Math.random() * 14 * 86400000);
+        manifested_time = delivered_time - (ctd_hours * 3600000);
+        edd_timestamp = manifested_time + (sla_hours * 3600000);
+    } else {
+        let pt = Math.random(); let eddOffsetDays;
+        if (pt < 0.5) eddOffsetDays = 0; else if (pt < 0.8) eddOffsetDays = 1; else if (pt < 0.9) eddOffsetDays = 2; else eddOffsetDays = randomInt(-3, -1);
+        edd_timestamp = now + (eddOffsetDays * 86400000) + randomInt(-12, 12)*3600000;
+        manifested_time = edd_timestamp - (sla_hours * 3600000);
+        if (manifested_time > now) {
+            let diff = manifested_time - now + randomInt(3600000, 10800000);
+            manifested_time -= diff;
+            edd_timestamp -= diff;
+        }
+    }
+
+    let p_off = {};
+    if (is_domestic || is_inner_eu) {
+        p_off = { 'Manifested':0, 'Pick Up':0.10, 'Origin SC':0.15, 'Origin Hub':0.18, 'Linehaul':0.20, 'Dest Hub':0.80, 'Dest SC':0.85, 'Out for Delivery':0.90, 'Delivered':1.0 };
+    } else {
+        p_off = { 'Manifested':0, 'Pick Up':0.05, 'Origin SC':0.08, 'Origin Hub':0.12, 'Export Customs':0.15, 'Linehaul':0.20, 'Import Customs':0.75, 'Dest Hub':0.85, 'Dest SC':0.88, 'Out for Delivery':0.92, 'Delivered':1.0 };
+    }
+
+    let progress = (now - manifested_time) / (ctd_hours * 3600000);
+    if (!isPending) progress = 1.0;
+    if (progress < 0) progress = 0;
+    if (isPending && progress >= 1.0) progress = 0.99;
+
+    const active_phases = TIMELINE_PHASES.filter(p => p_off[p] !== undefined);
+    current_phase = active_phases[0];
+    for (let p of active_phases) { if (progress >= p_off[p]) current_phase = p; }
+
+    let exception_cause = null; let failed_phase = null;
+    if (isException && isPending) {
+        current_phase = 'Exception';
+        exception_cause = randomChoice(EXCEPTION_CAUSES);
+        if (['Customer Not Home', 'Bad Address'].includes(exception_cause)) failed_phase = 'Out for Delivery';
+        else if (exception_cause === 'Pick up not successful') failed_phase = 'Manifested';
+        else if (['Weather Delay', 'Network Delay'].includes(exception_cause)) failed_phase = randomChoice(['Pick Up', 'Origin Hub', 'Linehaul', 'Dest Hub']);
+        else if (['Customs Hold'].includes(exception_cause)) failed_phase = is_cross_border ? randomChoice(['Export Customs', 'Import Customs']) : 'Linehaul';
+        else failed_phase = 'Linehaul';
+    }
+
+    let targetPhase = current_phase === 'Exception' ? failed_phase : current_phase;
+    let targetIdx = active_phases.indexOf(targetPhase);
+    if (targetIdx === -1) targetIdx = active_phases.length - 1;
+
+    let scan_history = {};
+    let last_scan_time = manifested_time;
+    
+    for (let i = 0; i <= targetIdx; i++) {
+        const p = active_phases[i];
+        let loc = '';
+        if (p === 'Manifested' || p === 'Pick Up' || p === 'Origin SC') loc = origin_sc;
+        else if (p === 'Origin Hub' || p === 'Export Customs' || p === 'Linehaul') loc = origin_hub;
+        else if (p === 'Import Customs' || p === 'Dest Hub') loc = dest_hub;
+        else loc = dest_sc;
+        
+        let baseline = manifested_time + (p_off[p] * ctd_hours * 3600000);
+        let variance = i === 0 ? 0 : randomInt(-1800000, 1800000);
+        let sim_time = baseline + variance;
+        if (sim_time > now && isPending) sim_time = now; 
+        
+        scan_history[p] = { time: sim_time, location: loc };
+        last_scan_time = sim_time;
+    }
+
+    return {
+        shipment_id: crypto.randomUUID(), customer_name: randomChoice(CUSTOMERS), product_type: randomChoice(PRODUCT_TYPES),
+        origin_hub: origin_hub, dest_hub: dest_hub, origin_sc: origin_sc, dest_sc: dest_sc,
+        current_phase: current_phase, edd_timestamp: edd_timestamp, last_scan_timestamp: last_scan_time, is_cross_border: is_cross_border,
+        exception_cause: exception_cause, failed_phase: failed_phase, scan_history: scan_history
+    };
+}
+function initData() { 
+    shipments = Array.from({length: START_PARCEL_COUNT}, generateShipment); 
+    document.getElementById('lastUpdated').innerText = `Last Updated: ${state.lastUpdated.toLocaleTimeString()}`;
+}
+
+function showToast(html) {
+    const t = document.getElementById('toast-alert');
+    if(!t) return;
+    t.innerHTML = html;
+    t.classList.add('show');
+    if(window.toastTimeout) clearTimeout(window.toastTimeout);
+    window.toastTimeout = setTimeout(() => { t.classList.remove('show'); }, 6000);
+}
+
+function applyRedFilter(element, filterJsonStr) {
+    const filters = JSON.parse(filterJsonStr.replace(/&quot;/g, '"'));
+    state.filters = {}; state.filterScope = 'All';
+    document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('[data-filter="All"]').classList.add('active');
+    
+    state.filters = filters; renderAll();
+    closeRedsModal();
+    const fStr = Object.values(filters).join(' & ');
+    showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:var(--dhl-yellow);">🚨 Critical Bottleneck Isolated</div>Filters Applied: <strong>${fStr}</strong>`);
+}
+function closeRedsModal() { document.getElementById('reds-modal').style.display = 'none'; }
+
+function autoFilterWorst() {
+    let cust = {}; let fm = {}; let mm = {}; let lm = {}; let exc = {};
+    
+    shipments.forEach(s => {
+        if (!cust[s.customer_name]) cust[s.customer_name] = {e:0, s:0};
+        const otd = getShipmentOTDStats(s);
+        if(otd.isEligible) { cust[s.customer_name].e++; if(otd.isOtdSuccess) cust[s.customer_name].s++; }
+        
+        if (!fm[s.origin_sc]) fm[s.origin_sc] = {e:0, s:0};
+        const otp = getShipmentOTPStats(s);
+        if(otp.isEligible) { fm[s.origin_sc].e++; if(otp.isOtpSuccess) fm[s.origin_sc].s++; }
+        
+        const r = s.origin_hub+'➔'+s.dest_hub;
+        if (!mm[r]) mm[r] = {e:0, s:0, oh: s.origin_hub, dh: s.dest_hub};
+        const nop = getShipmentNOPStats(s);
+        if(nop.isEligible) { mm[r].e++; if(nop.isNopSuccess) mm[r].s++; }
+        
+        if (!lm[s.dest_sc]) lm[s.dest_sc] = {e:0, s:0};
+        if(otd.isEligible) { lm[s.dest_sc].e++; if(otd.isOtdSuccess) lm[s.dest_sc].s++; }
+        
+        if (s.current_phase === 'Exception') {
+            if (!exc[s.dest_hub]) exc[s.dest_hub] = 0;
+            exc[s.dest_hub]++;
+        }
+    });
+
+    const getWorst = (obj, minV) => Object.entries(obj).filter(x=>x[1].e >= minV).map(x=>({k:x[0], score:x[1].s/x[1].e, ...x[1]})).sort((a,b)=>a.score-b.score)[0];
+    const topCust = getWorst(cust, 5);
+    const topFm = getWorst(fm, 5);
+    const topMm = getWorst(mm, 5);
+    const topLm = getWorst(lm, 5);
+    const topExc = Object.entries(exc).sort((a,b)=>b[1]-a[1])[0];
+
+    const topIssues = [];
+    if(topCust) topIssues.push({type:'Customer', title:`Customer: ${topCust.k}`, desc:'Severe End-to-End OTD underperformance', score:topCust.score, filter:{customer_name: topCust.k}});
+    if(topFm) topIssues.push({type:'FirstMile', title:`Origin SC: ${topFm.k}`, desc:'First Mile Pickup Bottleneck', score:topFm.score, filter:{origin_sc: topFm.k}});
+    if(topMm) topIssues.push({type:'MidMile', title:`Route: ${topMm.k}`, desc:'Linehaul Network Delay', score:topMm.score, filter:{origin_hub: topMm.oh, dest_hub: topMm.dh}});
+    if(topLm) topIssues.push({type:'LastMile', title:`Dest SC: ${topLm.k}`, desc:'Last Mile Delivery Risk', score:topLm.score, filter:{dest_sc: topLm.k}});
+    if(topExc) topIssues.push({type:'System', title:`Dest Hub: ${topExc[0]}`, desc:`Concentration of ${topExc[1]} Exceptions`, score:0, filter:{dest_hub: topExc[0], current_phase: 'Exception'}, isCount:true, count:topExc[1]});
+
+    const list = document.getElementById('reds-list');
+    if (topIssues.length === 0) list.innerHTML = '<div style="color:#666; font-style:italic;">No critical bottlenecks found.</div>';
+    else {
+        list.innerHTML = topIssues.map((iss, idx) => {
+            let icon = '🚨';
+            if(iss.type==='FirstMile') icon='📍'; else if(iss.type==='MidMile') icon='🚛'; else if(iss.type==='LastMile') icon='🚚'; else if(iss.type==='Customer') icon='🏢';
+            let scoreStr = iss.isCount ? `${iss.count} Cases` : formatPercent(iss.score);
+            return `<div class="red-item">
+                        <div class="red-icon">${icon}</div>
+                        <div class="red-content">
+                            <div class="red-title">${iss.title}</div>
+                            <div class="red-desc">${iss.desc}</div>
+                        </div>
+                        <div class="red-score" style="color:var(--dhl-red);">${scoreStr}</div>
+                        <button class="red-action-btn" id="isolate-btn-${idx}" data-filter="${JSON.stringify(iss.filter).replace(/"/g, '&quot;')}">Isolate</button>
+                    </div>`;
+        }).join('');
+        setTimeout(() => {
+            topIssues.forEach((iss, idx) => {
+                const btn = document.getElementById(`isolate-btn-${idx}`);
+                if(btn) btn.onclick = function() { applyRedFilter(this, this.getAttribute('data-filter')); };
+            });
+        }, 10);
+    }
+    document.getElementById('reds-modal').style.display = 'flex';
+}
+
+function drawSparkline(id, targetVal, color) {
+    const canvas = document.getElementById(id); if(!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width = canvas.parentElement.clientWidth || 80; const h = canvas.height = 30;
+    ctx.clearRect(0,0,w,h);
+    const pts = []; let cur = targetVal * 0.8;
+    for(let i=0; i<14; i++) { cur += (Math.random()-0.5)*(targetVal*0.1); if(i===13) cur = targetVal; pts.push(cur); }
+    const min = Math.min(...pts); const max = Math.max(...pts); const range = (max-min)||1;
+    ctx.beginPath();
+    pts.forEach((v,i) => {
+        const x = i*(w/13); const y = h - ((v-min)/range)*h*0.8 - h*0.1;
+        if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+    });
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.lineTo(w, h); ctx.lineTo(0, h); ctx.closePath();
+    const grad = ctx.createLinearGradient(0,0,0,h);
+    grad.addColorStop(0, color.replace('1)', '0.15)')); grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad; ctx.fill();
+}
+// --- Helpers ---
+function formatNumber(num) { 
+    return (num || 0).toLocaleString('en-US'); 
+}
+
+function formatPercent(num) {
+    if (num === null || num === undefined) return '-';
+    return (num * 100).toFixed(1) + "%";
+}
+
+function formatEventTime(timestamp) {
+    if (!timestamp) return '-';
+    const d = new Date(timestamp);
+    const day = String(d.getDate()).padStart(2, '0');
+    const month = String(d.getMonth() + 1).padStart(2, '0');
+    const hrs = String(d.getHours()).padStart(2, '0');
+    const mins = String(d.getMinutes()).padStart(2, '0');
+    return `${day}/${month} ${hrs}:${mins}`;
+}
+
+function getKPIColor(val) { if(val===null) return ''; if(val>=0.98) return 'background-color:#E6F4EA; color:#1E8E3E; font-weight:bold; box-shadow:inset 0 0 0 1px #1E8E3E;'; if(val>=0.95) return 'background-color:#FFF3E0; color:#E65100; font-weight:bold; box-shadow:inset 0 0 0 1px #E65100;'; return 'background-color:#FCE8E6; color:#D40511; font-weight:bold; box-shadow:inset 0 0 0 1px #D40511;'; }
+
+function getHeatmapBg(val, maxVal) {
+    if (val === 0) return 'background-color: transparent;';
+    const intensity = Math.max(0.05, val / maxVal);
+    if (intensity < 0.2) return `background-color: rgba(255, 204, 0, ${intensity.toFixed(2)}); color: #000;`;
+    return `background-color: rgba(212, 5, 17, ${intensity.toFixed(2)}); color: #fff; text-shadow: 0 1px 2px rgba(0,0,0,0.5); font-weight: bold;`;
+}
+
+function showSankeyHover(e, src, dst, vol, perfStr) {
+    const tooltip = document.getElementById('custom-tooltip');
+    if (!tooltip) return;
+    
+    tooltip.innerHTML = `<strong>Route:</strong> ${src} ➔ ${dst}<br/><strong>Volume:</strong> ${vol.toLocaleString()}<br/><strong>Performance:</strong> ${perfStr}`;
+    tooltip.style.display = 'block';
+    const limitX = Math.min(e.pageX + 15, window.innerWidth - 200);
+    tooltip.style.left = limitX + 'px';
+    tooltip.style.top = (e.pageY + 15) + 'px';
+}
+function showNodeHover(e, nodeName, vol) {
+    const tooltip = document.getElementById('custom-tooltip');
+    if (!tooltip) return;
+    tooltip.innerHTML = `<strong>Node:</strong> ${nodeName}<br/><strong>Total Volume:</strong> ${vol.toLocaleString()}`;
+    tooltip.style.display = 'block';
+    const limitX = Math.min(e.pageX + 15, window.innerWidth - 200);
+    tooltip.style.left = limitX + 'px';
+    tooltip.style.top = (e.pageY + 15) + 'px';
+}
+function hideTooltip() {
+    const tooltip = document.getElementById('custom-tooltip');
+    if (tooltip) tooltip.style.display = 'none';
+}
+function showTooltip(e, src, dest, vol, nop) {
+    const t = document.getElementById('custom-tooltip');
+    if (!src) { t.style.opacity = 0; t.style.display = 'none'; return; }
+    t.innerHTML = `<strong>Route:</strong> ${src} ➔ ${dest}<br><strong>Active Undelivered Vol:</strong> ${formatNumber(vol)}<br><strong>4-Wk Hist. Perf:</strong> ${formatPercent(nop)}`;
+    t.style.left = e.pageX + 15 + 'px';
+    t.style.top = e.pageY + 15 + 'px';
+    t.style.display = 'block';
+    t.style.opacity = 1;
+}
+
+// Analytics Helpers for Tables
+function getShipmentOTDStats(s) {
+    const eddMid = getMidnight(s.edd_timestamp);
+    const nowMid = getMidnight(Date.now());
+    const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
+    const isEligible = dayOffset >= 1 && dayOffset <= 56;
+    let isOtdSuccess = true; let expOtdScore = 1;
+
+    if (s.current_phase !== 'Delivered') {
+        if (s.exception_cause === 'Damaged in Transit' || s.exception_cause === 'Customer Claim') {
+            isOtdSuccess = false; expOtdScore = 0;
+        } else if (dayOffset === 0 && (s.current_phase === 'Pick Up' || s.current_phase === 'Manifested')) {
+            isOtdSuccess = false; expOtdScore = 0;
+        } else if (dayOffset > 0) {
+            isOtdSuccess = false; expOtdScore = 0;
+        }
+    }
+    return { isEligible, isOtdSuccess, isPending: !isEligible, expOtdScore };
+}
+
+function getShipmentNOPStats(s) {
+    const eddMid = getMidnight(s.edd_timestamp);
+    const nowMid = getMidnight(Date.now());
+    const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
+    const isEligible = dayOffset >= 1 && dayOffset <= 56;
+    let isNopSuccess = true;
+    if (s.current_phase === 'Exception' && ['Weather Delay', 'Customs Hold'].includes(s.exception_cause)) isNopSuccess = false;
+    if (isNopSuccess && Math.random() > 0.985) isNopSuccess = false;
+    return { isEligible, isNopSuccess };
+}
+
+function getShipmentSDStats(s) {
+    const eddMid = getMidnight(s.edd_timestamp);
+    const nowMid = getMidnight(Date.now());
+    const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);   
+    let isEligible = dayOffset >= 1 && dayOffset <= 56;
+    const isDelivered = s.current_phase === 'Delivered';
+    const isExceptionUnrecoverable = s.current_phase === 'Exception' && ['Damaged in Transit', 'Bad Address'].includes(s.exception_cause);
+    if (isEligible && (isExceptionUnrecoverable && !isDelivered)) {
+        isEligible = false;
+    }
+    return { isEligible, isSdSuccess: isDelivered };
+}
+
+function getShipmentOTPStats(s) {
+    if(!s.scan_history['Manifested']) return {isEligible: false};
+    const orderTs = s.scan_history['Manifested'].time;
+    let pickupTs = null;
+    if (s.scan_history['Pick Up']) pickupTs = s.scan_history['Pick Up'].time;
+    else if (s.scan_history['Export Customs']) pickupTs = s.scan_history['Export Customs'].time;
+    if (!pickupTs) return {isEligible: false};
+    const isOtpSuccess = (pickupTs - orderTs) <= (24 * 3600000); 
+    return {isEligible: true, isOtpSuccess};
+}
+
+// --- Filtering ---
+function handleRoleChange(role) {
+    state.role = role;
+    state.roleEntity = null;
+    state.roleDirection = 'both';
+    document.getElementById('directionSelect') && (document.getElementById('directionSelect').value = 'both');
+    
+    const wrapper = document.getElementById('entityWrapper');
+    const select = document.getElementById('entitySelect');
+    const dirWrapper = document.getElementById('directionWrapper');
+    select.innerHTML = '';
+    
+    if (role === 'admin' || !role) {
+        wrapper.style.display = 'none';
+        if(dirWrapper) dirWrapper.style.display = 'none';
+        renderAll();
+        return;
+    }
+    
+    wrapper.style.display = 'block';
+    
+    if (role === 'linehaul' || role === 'sc_manager') {
+        if(dirWrapper) dirWrapper.style.display = 'block';
+    } else {
+        if(dirWrapper) dirWrapper.style.display = 'none';
+    }
+    let options = [];
+    if (role === 'linehaul') {
+        options = HUBS.slice();
+    } else if (role === 'keyaccount') {
+        options = CUSTOMERS.slice();
+    } else if (role === 'sc_manager') {
+        const scSet = new Set();
+        shipments.forEach(s => { scSet.add(s.origin_sc); scSet.add(s.dest_sc); });
+        options = Array.from(scSet).sort();
+    }
+    
+    select.innerHTML = '<option value="">-- Mandatory: Select Entity --</option>' + options.map(o => `<option value="${o}">${o}</option>`).join('');
+    renderAll();
+}
+
+function handleEntityChange(entity) {
+    state.roleEntity = entity || null;
+    renderAll();
+}
+
+function handleDirectionChange(direction) {
+    state.roleDirection = direction || 'both';
+    renderAll();
+}
+
+function setFilter(key, value) {
+    if (state.filters[key] === value) delete state.filters[key]; else state.filters[key] = value; renderAll();
+}
+function setMultiFilter(filterObj) {
+    for (const [key, value] of Object.entries(filterObj)) {
+        if (state.filters[key] === value) delete state.filters[key]; else state.filters[key] = value;
+    } renderAll();
+}
+function clearFilters() {
+    state.filters = {}; state.filterScope = 'All';
+    document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+    document.querySelector('[data-filter="All"]').classList.add('active'); renderAll();
+}
+function getFilteredData() {
+    return shipments.filter(s => {
+        if (state.role === 'linehaul' && state.roleEntity) {
+            let match = false;
+            if (state.roleDirection === 'both') match = (s.origin_hub === state.roleEntity || s.dest_hub === state.roleEntity);
+            else if (state.roleDirection === 'inbound') match = (s.dest_hub === state.roleEntity);
+            else if (state.roleDirection === 'outbound') match = (s.origin_hub === state.roleEntity);
+            if (!match) return false;
+        } else if (state.role === 'sc_manager' && state.roleEntity) {
+            let match = false;
+            if (state.roleDirection === 'both') match = (s.origin_sc === state.roleEntity || s.dest_sc === state.roleEntity);
+            else if (state.roleDirection === 'inbound') match = (s.dest_sc === state.roleEntity);
+            else if (state.roleDirection === 'outbound') match = (s.origin_sc === state.roleEntity);
+            if (!match) return false;
+        } else if (state.role === 'keyaccount' && state.roleEntity) {
+            if (s.customer_name !== state.roleEntity) return false;
+        } else if (state.role !== 'admin' && !state.roleEntity) {
+            return false;
+        }
+
+        if (state.filterScope === 'Domestic' && s.is_cross_border) return false;
+        if (state.filterScope === 'Cross-border' && !s.is_cross_border) return false;
+        for (const [key, value] of Object.entries(state.filters)) {
+            if (key === 'is_pending') { if (value && s.current_phase === 'Delivered') return false; }
+            else if (key === 'edd_bucket') { if (getEDDBucket(s.edd_timestamp) !== value) return false; }
+            else if (key === 'scan_group') { if (getScanGroupDay(getScanAgingBucket(s.last_scan_timestamp)) !== value) return false; }
+            else if (s[key] !== value) return false;
+        } return true;
+    });
+}
+function renderBreadcrumbs() {
+    const bcContainer = document.getElementById('breadcrumbs'); bcContainer.innerHTML = '';
+    if (state.filterScope !== 'All') {
+        const tag = document.createElement('span'); tag.className = 'breadcrumb-tag'; tag.innerText = `Scope: ${state.filterScope}`;
+        tag.onclick = () => { document.querySelector('[data-filter="All"]').click(); }; bcContainer.appendChild(tag);
+    }
+    for (const [key, val] of Object.entries(state.filters)) {
+        const tag = document.createElement('span'); tag.className = 'breadcrumb-tag';
+        const displayKey = key.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase());
+        tag.innerText = `${displayKey}: ${val}`; tag.onclick = () => setFilter(key, val); bcContainer.appendChild(tag);
+    }
+    const resetBtn = document.getElementById('resetFiltersBtn');
+    resetBtn.style.display = (Object.keys(state.filters).length > 0 || state.filterScope !== 'All') ? 'inline-block' : 'none';
+}
+
+// --- KPIs & Sparklines ---
+function renderKPICards() {
+    const data = getFilteredData();
+    const container = document.getElementById('kpi-container');
+    const nowMid = getMidnight(Date.now());
+    
+    let tw = { total:0, otpC:0, otpS:0, fmHc:0, fmHs:0, nopC:0, nopS:0, mmHc:0, mmHs:0, otdC:0, otdS:0, otsdS:0, sdC:0, sdS:0, lmHc:0, lmHs:0, dmg:0, ctdHc:0, ctdHs:0 };
+    let lw = { total:0, otpC:0, otpS:0, fmHc:0, fmHs:0, nopC:0, nopS:0, mmHc:0, mmHs:0, otdC:0, otdS:0, otsdS:0, sdC:0, sdS:0, lmHc:0, lmHs:0, dmg:0, ctdHc:0, ctdHs:0 };
+
+    data.forEach(s => {
+        const eddMid = getMidnight(s.edd_timestamp);
+        const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
+        let g = null;
+        if(dayOffset >= 1 && dayOffset <= 7) g = tw;
+        else if(dayOffset >= 8 && dayOffset <= 14) g = lw;
+
+        if (g) {
+            g.total++;
+            const otpStats = getShipmentOTPStats(s);
+            if(otpStats.isEligible) { g.otpC++; if(otpStats.isOtpSuccess) g.otpS++; }
+            
+            const nopStats = getShipmentNOPStats(s);
+            if(nopStats.isEligible) { g.nopC++; if(nopStats.isNopSuccess) g.nopS++; }
+
+            const otdStats = getShipmentOTDStats(s);
+            if(otdStats.isEligible) { 
+                g.otdC++; 
+                if(otdStats.isOtdSuccess) { g.otdS++; g.otsdS++; } 
+                else if(s.current_phase === 'Delivered') { g.otsdS++; } 
+            }
+
+            const sdStats = getShipmentSDStats(s);
+            if(sdStats.isEligible) { g.sdC++; if(sdStats.isSdSuccess) g.sdS++; }
+
+            if(s.current_phase === 'Exception' && (s.exception_cause === 'Damaged in Transit' || s.exception_cause === 'Customer Claim')) g.dmg++;
+
+            if (s.current_phase === 'Delivered' || s.current_phase === 'Out for Delivery') {
+                const fmSt = s.scan_history['Manifested']?.time || s.scan_history['Pick Up']?.time;
+                const mmSt = s.scan_history['Export Customs']?.time || s.scan_history['Linehaul']?.time || s.scan_history['Pick Up']?.time;
+                const lmSt = s.scan_history['Dest Hub']?.time || s.scan_history['Import Customs']?.time || s.scan_history['Linehaul']?.time;
+                const deliv = s.scan_history['Delivered']?.time || s.scan_history['Out for Delivery']?.time;
+
+                if (fmSt && mmSt && mmSt >= fmSt) { g.fmHc++; g.fmHs += (mmSt - fmSt)/3600000; }
+                if (mmSt && lmSt && lmSt >= mmSt) { g.mmHc++; g.mmHs += (lmSt - mmSt)/3600000; }
+                if (lmSt && deliv && deliv >= lmSt) { g.lmHc++; g.lmHs += (deliv - lmSt)/3600000; }
+                if (fmSt && deliv && deliv >= fmSt) { g.ctdHc++; g.ctdHs += (deliv - fmSt)/3600000; }
+            }
+        }
+    });
+
+    const calcWow = (t_val, l_val, inverse = false) => {
+        if (l_val === 0 && t_val !== 0) return { val: t_val, text: '+100%', bg: inverse ? 'trend-negative' : 'trend-positive', arrow: '▲', color: inverse ? 'rgba(212,5,17,1)' : 'rgba(30,142,62,1)' };
+        if (l_val === 0 && t_val === 0) return { val: t_val, text: '0%', bg: 'trend-neutral', arrow: '▶', color: 'rgba(150,150,150,1)' };
+        const change = (t_val - l_val) / l_val;
+        const isBetter = inverse ? change <= 0 : change >= 0;
+        const bg = change === 0 ? 'trend-neutral' : (isBetter ? 'trend-positive' : 'trend-negative');
+        const arrow = change > 0 ? '▲' : (change < 0 ? '▼' : '▶');
+        const color = isBetter ? 'rgba(30,142,62,1)' : 'rgba(212,5,17,1)';
+        const prefix = change > 0 ? '+' : '';
+        return { val: t_val, text: `${prefix}${(change*100).toFixed(1)}%`, bg, arrow, color };
+    };
+
+    const avgVol = calcWow(tw.total/7, lw.total/7);
+    const otp = calcWow(tw.otpC>0?tw.otpS/tw.otpC:0, lw.otpC>0?lw.otpS/lw.otpC:0);
+    const nop = calcWow(tw.nopC>0?tw.nopS/tw.nopC:0, lw.nopC>0?lw.nopS/lw.nopC:0);
+    const otd = calcWow(tw.otdC>0?tw.otdS/tw.otdC:0, lw.otdC>0?lw.otdS/lw.otdC:0);
+    const otsd = calcWow(tw.otdC>0?tw.otsdS/tw.otdC:0, lw.otdC>0?lw.otsdS/lw.otdC:0);
+    const sd = calcWow(tw.sdC>0?tw.sdS/tw.sdC:0, lw.sdC>0?lw.sdS/lw.sdC:0);
+    const dmgRate = calcWow(tw.sdC>0?tw.dmg/tw.sdC:0, lw.sdC>0?lw.dmg/lw.sdC:0, true);
+
+    const fmH = calcWow(tw.fmHc>0?tw.fmHs/tw.fmHc:0, lw.fmHc>0?lw.fmHs/lw.fmHc:0, true);
+    const mmH = calcWow(tw.mmHc>0?tw.mmHs/tw.mmHc:0, lw.mmHc>0?lw.mmHs/lw.mmHc:0, true);
+    const lmH = calcWow(tw.lmHc>0?tw.lmHs/tw.lmHc:0, lw.lmHc>0?lw.lmHs/lw.lmHc:0, true);
+    const ctdH = calcWow(tw.ctdHc>0?tw.ctdHs/tw.ctdHc:0, lw.ctdHc>0?lw.ctdHs/lw.ctdHc:0, true);
+
+    const formatRate = (num) => (num * 100).toFixed(1) + "%";
+
+    const html = `
+        <div class="kpi-group-card" style="border-top: 3px solid #f59e0b; flex: 7;">
+            <div class="kg-header"><span class="kg-title">📊 Core Performance</span></div>
+            <div class="kg-body" style="grid-template-columns: repeat(7, 1fr) !important; display: grid;">
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">Daily Avg Shipments</div>
+                    <div class="kpi-mini-val">${formatNumber(Math.round(avgVol.val))}</div>
+                    <div class="kpi-mini-wow ${avgVol.bg}">${avgVol.arrow} ${avgVol.text} WoW</div>
+                    <canvas id="sp-avg" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">On-Time Pickup</div>
+                    <div class="kpi-mini-val">${formatPercent(otp.val)}</div>
+                    <div class="kpi-mini-wow ${otp.bg}">${otp.arrow} ${otp.text} WoW</div>
+                    <canvas id="sp-otp" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">NOP%</div>
+                    <div class="kpi-mini-val">${formatPercent(nop.val)}</div>
+                    <div class="kpi-mini-wow ${nop.bg}">${nop.arrow} ${nop.text} WoW</div>
+                    <canvas id="sp-nop" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">OTD%</div>
+                    <div class="kpi-mini-val">${formatPercent(otd.val)}</div>
+                    <div class="kpi-mini-wow ${otd.bg}">${otd.arrow} ${otd.text} WoW</div>
+                    <canvas id="sp-otd" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">OTSD%</div>
+                    <div class="kpi-mini-val">${formatPercent(otsd.val)}</div>
+                    <div class="kpi-mini-wow ${otsd.bg}">${otsd.arrow} ${otsd.text} WoW</div>
+                    <canvas id="sp-otsd" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">SD%</div>
+                    <div class="kpi-mini-val">${formatPercent(sd.val)}</div>
+                    <div class="kpi-mini-wow ${sd.bg}">${sd.arrow} ${sd.text} WoW</div>
+                    <canvas id="sp-sd" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">DAMAGE%</div>
+                    <div class="kpi-mini-val">${formatRate(dmgRate.val)}</div>
+                    <div class="kpi-mini-wow ${dmgRate.bg}">${dmgRate.arrow} ${dmgRate.text} WoW</div>
+                    <canvas id="sp-dmg" style="width:100%;height:30px;"></canvas>
+                </div>
+            </div>
+        </div>
+        <div class="kpi-group-card" style="border-top: 3px solid var(--dhl-red); flex: 4;">
+            <div class="kg-header"><span class="kg-title">⏱ Transit Hours</span></div>
+            <div class="kg-body" style="grid-template-columns: repeat(4, 1fr) !important; display: grid;">
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">FMh</div>
+                    <div class="kpi-mini-val">${fmH.val.toFixed(1)}h</div>
+                    <div class="kpi-mini-wow ${fmH.bg}">${fmH.arrow} ${fmH.text} WoW</div>
+                    <canvas id="sp-fmh" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">MMh</div>
+                    <div class="kpi-mini-val">${mmH.val.toFixed(1)}h</div>
+                    <div class="kpi-mini-wow ${mmH.bg}">${mmH.arrow} ${mmH.text} WoW</div>
+                    <canvas id="sp-mmh" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">LMh</div>
+                    <div class="kpi-mini-val">${lmH.val.toFixed(1)}h</div>
+                    <div class="kpi-mini-wow ${lmH.bg}">${lmH.arrow} ${lmH.text} WoW</div>
+                    <canvas id="sp-lmh" style="width:100%;height:30px;"></canvas>
+                </div>
+                <div class="kpi-mini">
+                    <div class="kpi-mini-title">CtdH</div>
+                    <div class="kpi-mini-val">${ctdH.val.toFixed(1)}h</div>
+                    <div class="kpi-mini-wow ${ctdH.bg}">${ctdH.arrow} ${ctdH.text} WoW</div>
+                    <canvas id="sp-ctdh" style="width:100%;height:30px;"></canvas>
+                </div>
+            </div>
+        </div>
+    `;
+    container.innerHTML = html;
+
+    try {
+        drawSparkline('sp-avg', avgVol.val, avgVol.color); drawSparkline('sp-otp', otp.val, otp.color); drawSparkline('sp-nop', nop.val, nop.color);
+        drawSparkline('sp-otd', otd.val, otd.color); drawSparkline('sp-otsd', otsd.val, otsd.color); drawSparkline('sp-sd', sd.val, sd.color);
+        drawSparkline('sp-dmg', dmgRate.val, dmgRate.color); drawSparkline('sp-fmh', fmH.val, fmH.color); drawSparkline('sp-mmh', mmH.val, mmH.color);
+        drawSparkline('sp-lmh', lmH.val, lmH.color); drawSparkline('sp-ctdh', ctdH.val, ctdH.color);
+    } catch(e) {}
+}
+
+// --- Views Rendering ---
+function renderView1(data) {
+    const container = document.getElementById('view1-container');
+    const isDomesticOnly = state.filterScope === 'Domestic';
+    const matrix = {}; EDD_BUCKETS_ORDER.forEach(b => matrix[b] = {});
+    let colTotals = {}; PHASES.forEach(p => colTotals[p] = 0);
+    let grandTotal = 0; let maxVal = 0;
+    
+    const rowOtd = {}; const rowCtd = {};
+    let gOtdE = 0, gOtdS = 0, gCtdC = 0, gCtdS = 0;
+    EDD_BUCKETS_ORDER.forEach(b => { rowOtd[b] = { e: 0, s: 0 }; rowCtd[b] = { c: 0, s: 0 }; });
+
+    data.forEach(s => {
+        const row = getEDDBucket(s.edd_timestamp); const col = s.current_phase;
+        matrix[row][col] = (matrix[row][col] || 0) + 1;
+        colTotals[col]++; grandTotal++;
+
+        const stats = getShipmentOTDStats(s);
+        if (stats.isEligible) { 
+            rowOtd[row].e++; gOtdE++;
+            if (stats.isOtdSuccess) { rowOtd[row].s++; gOtdS++; }
+        }
+        
+        if (s.current_phase === 'Delivered') {
+             const first = s.scan_history['Manifested']?.time || s.scan_history['Pick Up']?.time;
+             const deliv = s.scan_history['Delivered']?.time;
+             if (first && deliv) {
+                  const hrs = (deliv - first) / 3600000;
+                  rowCtd[row].c++; rowCtd[row].s += hrs;
+                  gCtdC++; gCtdS += hrs;
+             }
+        }
+    });
+
+    EDD_BUCKETS_ORDER.forEach(edd => PHASES.forEach(p => { if (p !== 'Delivered' && matrix[edd][p] > maxVal) maxVal = matrix[edd][p]; }));
+    let html = `<table style="table-layout: fixed; width: 100%; height: 550px;"><thead><tr><th style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 4px;">EDD Bucket</th>`;
+    PHASES.forEach(p => {
+        const hiddenClass = (isDomesticOnly && (p === 'Export Customs' || p === 'Import Customs')) ? 'hidden' : '';
+        const clickStr = (p!=='OTD %' && p!=='CTD (H)' && p!=='Pending' && p!=='Exception') ? `style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2; cursor:pointer;" onclick="delete state.filters.edd_bucket; setFilter('current_phase', '${p}')"` : `style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2;"`;
+        let iconHtml = PHASE_ICONS[p] ? `<div style="font-size: 2em; margin-bottom: 8px;">${PHASE_ICONS[p]}</div>` : '';
+        html += `<th class="numeric center ${hiddenClass}" ${clickStr}>
+                ${iconHtml}
+                ${p.replace(' ','<br>')}
+                </th>`;
+    });
+    html += `<th class="numeric center" style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2;" title="Row Total">
+                <span style="font-size:2em; display:block; margin-bottom:6px;">📊</span>Total
+             </th>
+             <th class="numeric center" style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2; cursor:pointer;" onclick="delete state.filters.edd_bucket; setFilter('is_pending', true)" title="Parcels not yet delivered">
+                <span style="font-size:2em; display:block; margin-bottom:6px;">📦</span>Pending
+             </th>
+             <th class="numeric center" style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2;" title="On Time Delivery %">
+                <span style="font-size:2em; display:block; margin-bottom:6px;">🎯</span>OTD %
+             </th>
+             <th class="numeric center" style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2;" title="Avg Customer to Delivery Hours">
+                <span style="font-size:2em; display:block; margin-bottom:6px;">⏱️</span>CTD (h)
+             </th>
+             </tr></thead><tbody>`;
+    
+    EDD_BUCKETS_ORDER.forEach(edd => {
+        const isActiveRow = state.filters.edd_bucket === edd ? 'active-filter' : '';
+        const isAlertRow = edd === "s4+ or more" ? 'alert-row text-red' : '';
+        let eddIcon = '⏳ ';
+        if (['s4+ or more', '-3', '-2', 'Yesterday'].includes(edd)) eddIcon = '⚠️ ';
+        else if (edd === 'Today') eddIcon = '📍 ';
+        
+        const todayStyle = edd === 'Today' ? 'font-weight: 900; outline: 2px solid #111; outline-offset: -1px; background-color: #fafafa;' : '';
+        
+        html += `<tr class="${isActiveRow} ${isAlertRow}" style="${todayStyle}">
+            <td style="cursor:pointer;" onclick="setFilter('edd_bucket', '${edd}')">${eddIcon}${edd}</td>`;
+        let rowTotal = 0; let rowDelivered = 0;
+        PHASES.forEach(p => {
+            const hiddenClass = (isDomesticOnly && (p === 'Export Customs' || p === 'Import Customs')) ? 'hidden' : '';
+            const val = matrix[edd][p] || 0; rowTotal += val;
+            if (p === 'Delivered') rowDelivered = val;
+            
+            let isAtRisk = false;
+            if (p === 'Exception' && val > 0) isAtRisk = true;
+            else if (['s4+ or more', '-3', '-2', 'Yesterday'].includes(edd) && p !== 'Delivered' && val > 0) isAtRisk = true; 
+            else if (edd === 'Today' && !['Out for Delivery', 'Delivered'].includes(p) && val > 0) isAtRisk = true; 
+            
+            const actionClass = isAtRisk ? 'action-frame' : '';
+            const bgAlertClass = (p === 'Exception' && val > 0) ? 'bg-red' : '';
+            const isActiveCell = (state.filters.edd_bucket === edd && state.filters.current_phase === p) ? 'active-filter' : '';
+            const heatmapStyle = p === 'Delivered' ? '' : getHeatmapBg(val, maxVal);
+            
+            html += `<td class="numeric ${hiddenClass} ${bgAlertClass} ${isActiveCell} ${actionClass}" 
+                         style="cursor:pointer; text-align:center; ${heatmapStyle}"  
+                         onclick="setMultiFilter({edd_bucket: '${edd}', current_phase: '${p}'}); event.stopPropagation();">
+                        ${val > 0 ? formatNumber(val) : '-'}</td>`;
+        });
+        
+        const pendingVol = rowTotal - rowDelivered;
+        const otd = rowOtd[edd].e > 0 ? rowOtd[edd].s / rowOtd[edd].e : null;
+        const ctd = rowCtd[edd].c > 0 ? rowCtd[edd].s / rowCtd[edd].c : null;
+        
+        const isPendingActive = (state.filters.edd_bucket === edd && state.filters.is_pending === true) ? 'active-filter' : '';
+        html += `<td class="numeric" style="font-weight:bold;">${formatNumber(rowTotal)}</td>
+                 <td class="numeric ${isPendingActive}" style="color:var(--text-secondary); font-weight:600; cursor:pointer;" onclick="setMultiFilter({edd_bucket: '${edd}', is_pending: true}); event.stopPropagation();">${formatNumber(pendingVol)}</td>
+                 <td class="numeric ${otd !== null && otd < 0.95 ? 'text-red' : ''}">${otd !== null ? formatPercent(otd) : '-'}</td>
+                 <td class="numeric" style="color:#1A73E8">${ctd !== null ? ctd.toFixed(1) + 'h' : '-'}</td></tr>`;
+    });
+    
+    html += `<tr style="font-weight:bold; background-color:#FAFAFA;"><td>Grand Total</td>`;
+    PHASES.forEach(p => {
+        const hiddenClass = (isDomesticOnly && (p === 'Export Customs' || p === 'Import Customs')) ? 'hidden' : '';
+        const clickStr = (p!=='OTD %' && p!=='CTD (H)' && p!=='Pending' && p!=='Exception') ? `style="cursor:pointer;" onclick="delete state.filters.edd_bucket; setFilter('current_phase', '${p}')"` : ``;
+        html += `<td class="numeric ${hiddenClass}" ${clickStr}>${formatNumber(colTotals[p])}</td>`;
+    });
+    
+    const grandOtd = gOtdE > 0 ? gOtdS / gOtdE : null;
+    const grandCtd = gCtdC > 0 ? gCtdS / gCtdC : null;
+    const grandDelivered = colTotals['Delivered'] || 0;
+    const grandPending = grandTotal - grandDelivered;
+    html += `<td class="numeric">${formatNumber(grandTotal)}</td>
+             <td class="numeric" style="color:var(--text-secondary); cursor:pointer;" onclick="delete state.filters.edd_bucket; setFilter('is_pending', true)">${formatNumber(grandPending)}</td>
+             <td class="numeric ${grandOtd !== null && grandOtd < 0.95 ? 'text-red' : ''}">${grandOtd !== null ? formatPercent(grandOtd) : '-'}</td>
+             <td class="numeric" style="color:#1A73E8">${grandCtd !== null ? grandCtd.toFixed(1) + 'h' : '-'}</td></tr></tbody></table>`;
+    container.innerHTML = html;
+}
+
+function renderView2(data) {
+    const container = document.getElementById('view2-container');
+    const groupings = {}; let maxVol = 0; let totalVol = 0;
+    data.forEach(s => {
+        if(s.current_phase === 'Delivered') return;
+        const group = getScanGroupDay(getScanAgingBucket(s.last_scan_timestamp));
+        if(!groupings[group]) groupings[group] = { total: 0, status: getStatusForAge(group) };
+        groupings[group].total++; totalVol++;
+        if (groupings[group].total > maxVol) maxVol = groupings[group].total;
+    });
+    
+    const activeGroups = SCAN_AGING_ORDER_DAYS.filter(g => groupings[g] && groupings[g].total > 0);
+    
+    let html = `<table class="heatmap-table" style="table-layout: fixed; width:100%;"><thead><tr>`;
+    html += `<th class="row-header center" style="vertical-align:bottom; text-align:center;">Aging Group</th>`;
+    activeGroups.forEach(g => html += `<th class="center" style="vertical-align:bottom; text-align:center;">${g}</th>`);
+    html += `<th class="numeric center" style="vertical-align:bottom; text-align:center;">Grand Total</th></tr></thead><tbody><tr>`;
+    html += `<td class="row-header center" style="text-align:center;"><b>Volume</b></td>`;
+    
+    activeGroups.forEach(g => {
+        const vol = groupings[g].total;
+        const status = groupings[g].status;
+        const isActive = state.filters.scan_group === g ? 'active-filter' : '';
+        const pct = totalVol > 0 ? (vol/totalVol)*100 : 0;
+        
+        let heatmap = getHeatmapBg(vol, maxVol);
+        if (status === 'Critical') heatmap = 'background-color: var(--hover-bg-red); color: var(--dhl-red); font-weight:700;';
+        
+        html += `<td class="numeric heatmap-cell ${isActive}" style="position:relative; z-index:1; ${heatmap}" onclick="setFilter('scan_group', '${g}')">
+            <div style="position:absolute; bottom:0; left:0; right:0; height:${pct}%; background:rgba(212,5,17,0.15); z-index:-1;"></div>
+            ${formatNumber(vol)}
+        </td>`;
+    });
+    
+    html += `<td class="numeric" style="font-weight:bold; background-color:#FAFAFA;">${formatNumber(totalVol)}</td></tr></tbody></table>`;
+    container.innerHTML = html;
+}
+
+function renderView3(data) {
+    const container = document.getElementById('view3-container');
+    const matrix = {}; let maxVol = 0; let grandTotal = 0;
+    HUBS.forEach(o => { matrix[o] = {}; HUBS.forEach(d => matrix[o][d] = {vol:0, oE:0, oS:0}); });
+    let colTotals = {}; HUBS.forEach(h => colTotals[h] = 0);
+    
+    data.forEach(s => {
+        matrix[s.origin_hub][s.dest_hub].vol++; 
+        colTotals[s.dest_hub]++; 
+        grandTotal++;
+        
+        const stats = getShipmentOTDStats(s);
+        if (stats.isEligible) {
+            matrix[s.origin_hub][s.dest_hub].oE++;
+            if (stats.isOtdSuccess) matrix[s.origin_hub][s.dest_hub].oS++;
+        }
+        
+        if(matrix[s.origin_hub][s.dest_hub].vol > maxVol) maxVol = matrix[s.origin_hub][s.dest_hub].vol;
+    });
+
+    let html = `<table class="heatmap-table" style="width:100%; text-align:center;"><thead><tr><th>O \\ D</th>`;
+    HUBS.forEach(h => html += `<th>${h}</th>`);
+    html += `<th>Total</th></tr></thead><tbody>`;
+    HUBS.forEach(ori => {
+        const isActiveRow = state.filters.origin_hub === ori ? 'active-filter' : '';
+        html += `<tr><td class="row-header ${isActiveRow}" onclick="setFilter('origin_hub', '${ori}')" style="cursor:pointer;">${ori}</td>`;
+        let rowTotal = 0;
+        HUBS.forEach(des => {
+            const cell = matrix[ori][des];
+            const vol = cell.vol; rowTotal += vol;
+            const otd = cell.oE > 0 ? cell.oS / cell.oE : null;
+            const isSelf = ori === des;
+            const isActiveCol = state.filters.dest_hub === des ? 'active-filter' : '';
+            
+            if (vol === 0) {
+                html += `<td class="heatmap-cell ${isActiveCol}" style="${isSelf ? 'background-color:#f8f9fa;' : ''}"></td>`;
+                return;
+            }
+
+            const minSize = 16;
+            const maxSize = 40;
+            const size = Math.max(minSize, (Math.sqrt(vol) / Math.sqrt(maxVol)) * maxSize);
+            
+            let bg = '#e5e7eb'; let color = '#000';
+            if (otd !== null) {
+                if (otd >= 0.95) { bg = '#10b981'; color = '#fff'; }
+                else if (otd >= 0.85) { bg = '#fbbf24'; color = '#000'; }
+                else { bg = '#ef4444'; color = '#fff'; }
+            }
+
+            const bubbleHtml = `<div style="width:${size}px; height:${size}px; border-radius:50%; background-color:${bg}; color:${color}; display:flex; align-items:center; justify-content:center; margin:0 auto; font-size:${size < 24 ? 9 : 11}px; font-weight:bold; box-shadow:0 1px 3px rgba(0,0,0,0.2); transition:transform 0.1s;" title="Route: ${ori} ➔ ${des}\nVol: ${vol}\nOTD: ${otd !== null ? (otd*100).toFixed(1)+'%' : 'N/A'}">${vol}</div>`;
+
+            html += `<td class="heatmap-cell ${isActiveCol}" style="${isSelf ? 'background-color:#f8f9fa;' : ''} cursor:pointer; vertical-align:middle; padding:4px;" 
+                         onclick="setFilter('dest_hub', '${des}'); event.stopPropagation();"
+                         onmouseover="this.querySelector('div').style.transform='scale(1.15)'"
+                         onmouseout="this.querySelector('div').style.transform='scale(1)'">
+                        ${bubbleHtml}</td>`;
+        });
+        html += `<td class="numeric" style="font-weight:bold; vertical-align:middle;">${formatNumber(rowTotal)}</td></tr>`;
+    });
+    html += `<tr style="font-weight:bold; background-color:#FAFAFA;"><td>Grand Total</td>`;
+    HUBS.forEach(h => html += `<td class="numeric" style="vertical-align:middle;">${formatNumber(colTotals[h])}</td>`);
+    html += `<td class="numeric" style="vertical-align:middle;">${formatNumber(grandTotal)}</td></tr></tbody></table>`;
+    
+    html += `
+        <div style="display:flex; justify-content:flex-end; gap:16px; margin-top:12px; font-size:11px; font-weight:500; align-items:center; padding-right:10px;">
+            <span style="color:var(--text-secondary);">Bubble Size = Volume</span>
+            <span><span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#10b981; vertical-align:middle; margin-right:4px;"></span> OTD ≥ 95%</span>
+            <span><span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#fbbf24; vertical-align:middle; margin-right:4px;"></span> 85% - 94.9%</span>
+            <span><span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#ef4444; vertical-align:middle; margin-right:4px;"></span> < 85%</span>
+            <span><span style="display:inline-block; width:12px; height:12px; border-radius:50%; background:#e5e7eb; vertical-align:middle; margin-right:4px;"></span> N/A (Pending)</span>
+        </div>
+    `;
+    container.innerHTML = html;
+}
+
+function buildAnalyticsTable(data, entityKey, entityTitle, entityArray = null) {
+    const tableData = {}; let totalVol = 0; let maxVol = 0;
+    let gOtdEligible = 0, gOtdSuccess = 0, gExpCount = 0, gExpSum = 0;
+    
+    data.forEach(s => {
+        const ent = s[entityKey];
+        if(!tableData[ent]) tableData[ent] = { vol: 0, otdEligible: 0, otdSuccess: 0, expCount: 0, expSum: 0 };
+        const cd = tableData[ent];
+        cd.vol++; totalVol++; if(cd.vol > maxVol) maxVol = cd.vol;
+        
+        const stats = getShipmentOTDStats(s);
+        if (stats.isEligible) { cd.otdEligible++; cd.otdSuccess += stats.isOtdSuccess?1:0; gOtdEligible++; gOtdSuccess += stats.isOtdSuccess?1:0; }
+        if (stats.isPending) { cd.expCount++; cd.expSum += stats.expOtdScore; gExpCount++; gExpSum += stats.expOtdScore; }
+    });
+
+    let rowKeys = entityArray || Object.keys(tableData);
+    let rows = rowKeys.map(k => ({ name: k, ...(tableData[k] || {vol:0, otdEligible:0, otdSuccess:0, expCount:0, expSum:0}) })).filter(r => r.vol > 0).sort((a,b) => b.vol - a.vol);
+    
+    let html = `<div style="max-height: 460px; overflow-y: auto;"><table style="table-layout: fixed; width: 100%;"><thead><tr style="height: 44px;"><th style="padding: 8px 4px; text-align: left;">${entityTitle}</th><th class="numeric center" style="padding: 8px 4px;">Vol</th><th class="numeric center" style="padding: 8px 4px;">% Share</th><th class="numeric center" style="padding: 8px 4px;">OTD %</th><th class="numeric center" style="padding: 8px 4px;" title="Expected For Future Deliveries">Exp OTD %</th></tr></thead><tbody>`;
+    rows.forEach(r => {
+        const share = totalVol > 0 ? r.vol / totalVol : 0;
+        const otd = r.otdEligible > 0 ? r.otdSuccess / r.otdEligible : null;
+        const expOtd = r.expCount > 0 ? r.expSum / r.expCount : null;
+        const isActive = state.filters[entityKey] === r.name ? 'active-filter' : '';
+        html += `<tr class="${isActive}" style="height: 44px; cursor: pointer;" onclick="setFilter('${entityKey}', '${r.name}');">
+            <td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding: 4px;" title="${r.name}">${r.name}</td>
+            <td class="numeric center" style="position:relative; z-index:1; padding: 4px;">
+                <div style="position:absolute; right:0; top:2px; bottom:2px; width:${share*100}%; background:rgba(255,204,0,0.3); z-index:-1; border-radius:4px;"></div>
+                ${formatNumber(r.vol)}
+            </td>
+            <td class="numeric center" style="padding: 4px;">${formatPercent(share)}</td>
+            <td class="numeric center" style="padding: 4px; ${getKPIColor(otd)}">${otd !== null ? formatPercent(otd) : '-'}</td>
+            <td class="numeric center" style="padding: 4px; ${getKPIColor(expOtd)}">${expOtd !== null ? formatPercent(expOtd) : '-'}</td>
+        </tr>`;
+    });
+
+    const gOtd = gOtdEligible > 0 ? gOtdSuccess / gOtdEligible : null;
+    const gExpOtd = gExpCount > 0 ? gExpSum / gExpCount : null;
+    html += `<tr style="height: 44px; font-weight:bold; background-color:#FAFAFA; position: sticky; bottom: 0; box-shadow: 0 -1px 0 var(--border-color); z-index:2;"><td>Grand Total</td><td class="numeric center">${formatNumber(totalVol)}</td><td class="numeric center">100.0%</td><td class="numeric center" style="${getKPIColor(gOtd)}">${gOtd !== null ? formatPercent(gOtd) : '-'}</td><td class="numeric center" style="${getKPIColor(gExpOtd)}">${gExpOtd !== null ? formatPercent(gExpOtd) : '-'}</td></tr></tbody></table></div>`;
+    return html;
+}
+
+function renderView4(data) { document.getElementById('view4-container').innerHTML = buildAnalyticsTable(data, 'customer_name', 'Customer', CUSTOMERS); }
+function renderView5(data) { document.getElementById('view5-container').innerHTML = buildAnalyticsTable(data, 'product_type', 'Product', PRODUCT_TYPES); }
+function renderView7(data) { document.getElementById('view7-container').innerHTML = buildAnalyticsTable(data, 'origin_sc', 'Origin SC'); }
+function renderView8(data) { document.getElementById('view8-container').innerHTML = buildAnalyticsTable(data, 'dest_sc', 'Dest SC'); }
+
+function renderView10(data) { const excs = data.filter(s => s.current_phase === 'Exception'); document.getElementById('view10-container').innerHTML = buildAnalyticsTable(excs, 'exception_cause', 'Exception'); }
+
+function renderView9(data) {
+    const container = document.getElementById('view9-container');
+    const fmFlow = {}; const mmFlow = {}; const lmFlow = {};
+    const nowMid = getMidnight(Date.now());
+
+    data.forEach(s => {
+        if (s.current_phase !== 'Delivered') {
+            const fmKey = s.origin_sc + '->' + s.origin_hub;
+            const mmKey = s.origin_hub + '->' + s.dest_hub;
+            const lmKey = s.dest_hub + '->' + s.dest_sc;
+
+            if(!fmFlow[fmKey]) fmFlow[fmKey] = { vol:0, histEligible:0, histSuccess:0 };
+            if(!mmFlow[mmKey]) mmFlow[mmKey] = { vol:0, histEligible:0, histSuccess:0 };
+            if(!lmFlow[lmKey]) lmFlow[lmKey] = { vol:0, histEligible:0, histSuccess:0 };
+
+            fmFlow[fmKey].vol++; mmFlow[mmKey].vol++; lmFlow[lmKey].vol++;
+        }
+    });
+
+    data.forEach(s => {
+        const eddMid = getMidnight(s.edd_timestamp);
+        const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
+        const is4W = dayOffset >= 1 && dayOffset <= 28;
+        const is1W = dayOffset >= 1 && dayOffset <= 7;
+        
+        if (is4W) {
+            const fmKey = s.origin_sc + '->' + s.origin_hub;
+            const mmKey = s.origin_hub + '->' + s.dest_hub;
+            const lmKey = s.dest_hub + '->' + s.dest_sc;
+
+            const otp = getShipmentOTPStats(s);
+            if(otp.isEligible && fmFlow[fmKey]) { 
+                fmFlow[fmKey].histEligible++; if(otp.isOtpSuccess) fmFlow[fmKey].histSuccess++; 
+                if(is1W) { fmFlow[fmKey].hist1wEligible = (fmFlow[fmKey].hist1wEligible||0)+1; if(otp.isOtpSuccess) fmFlow[fmKey].hist1wSuccess = (fmFlow[fmKey].hist1wSuccess||0)+1; }
+            }
+
+            const nop = getShipmentNOPStats(s);
+            if(nop.isEligible && mmFlow[mmKey]) { 
+                mmFlow[mmKey].histEligible++; if(nop.isNopSuccess) mmFlow[mmKey].histSuccess++; 
+                if(is1W) { mmFlow[mmKey].hist1wEligible = (mmFlow[mmKey].hist1wEligible||0)+1; if(nop.isNopSuccess) mmFlow[mmKey].hist1wSuccess = (mmFlow[mmKey].hist1wSuccess||0)+1; }
+            }
+
+            const otd = getShipmentOTDStats(s);
+            if(otd.isEligible && lmFlow[lmKey]) { 
+                lmFlow[lmKey].histEligible++; if(otd.isOtdSuccess) lmFlow[lmKey].histSuccess++; 
+                if(is1W) { lmFlow[lmKey].hist1wEligible = (lmFlow[lmKey].hist1wEligible||0)+1; if(otd.isOtdSuccess) lmFlow[lmKey].hist1wSuccess = (lmFlow[lmKey].hist1wSuccess||0)+1; }
+            }
+        }
+    });
+
+    const FLAGS = {'MAD':'🇪🇸','BCN':'🇪🇸','FRA':'🇩🇪','MUC':'🇩🇪','CDG':'🇫🇷','LYS':'🇫🇷','AMS':'🇳🇱','LHR':'🇬🇧','JFK':'🇺🇸','DEL':'🇮🇳','KUL':'🇲🇾','BKK':'🇹🇭','SYD':'🇦🇺','IST':'🇹🇷'};
+    const buildSVG = (flowData, topN, title) => {
+        const edges = Object.entries(flowData).map(([k, v]) => {
+            const perf4w = v.histEligible > 0 ? v.histSuccess / v.histEligible : null;
+            const perf1w = (v.hist1wEligible && v.hist1wEligible > 0) ? v.hist1wSuccess / v.hist1wEligible : (perf4w !== null ? perf4w : null);
+            return { src: k.split('->')[0], dst: k.split('->')[1], vol: v.vol, perf4w: perf4w, perf1w: perf1w };
+        }).sort((a,b) => b.vol - a.vol).slice(0, topN);
+
+        if (edges.length === 0) return `<div style="padding:20px; text-align:center;">No active packages tracking in this phase natively.</div>`;
+
+        const leftNodes = {}; const rightNodes = {};
+        edges.forEach(e => { leftNodes[e.src] = (leftNodes[e.src] || 0) + e.vol; rightNodes[e.dst] = (rightNodes[e.dst] || 0) + e.vol; });
+
+        const w = 450; const h = 400; const nodeW = 12; const pad = 16;
+        const sortedLeft = Object.entries(leftNodes).sort((a,b)=>b[1]-a[1]);
+        const sortedRight = Object.entries(rightNodes).sort((a,b)=>b[1]-a[1]);
+        
+        const maxTotalVol = Math.max(sortedLeft.reduce((s, n) => s + n[1], 0), sortedRight.reduce((s, n) => s + n[1], 0)) || 1;
+        const maxNodes = Math.max(sortedLeft.length, sortedRight.length);
+        const availableHeight = h - (maxNodes - 1) * pad - 40; 
+        const ky = availableHeight / maxTotalVol;
+
+        let curY = 20; const lPos = {};
+        sortedLeft.forEach(([n, v]) => { lPos[n] = { y: curY, h: v * ky, offset: 0, v }; curY += v * ky + pad; });
+
+        curY = 20; const rPos = {};
+        sortedRight.forEach(([n, v]) => { rPos[n] = { y: curY, h: v * ky, offset: 0, v }; curY += v * ky + pad; });
+
+        let svg = `<div style="text-align: center; font-weight: 800; font-size: 14px; margin-bottom: 5px; color: var(--dhl-red); letter-spacing: 0.5px;">${title}</div>`;
+        svg += `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}" style="background:#fcfcfc; border-radius:8px; font-family:Inter,sans-serif; overflow:visible;">`;
+        
+        let leftFilterKey = ''; let rightFilterKey = '';
+        if (title.includes('First') || title.includes('Orig SCs')) { leftFilterKey = 'origin_sc'; rightFilterKey = 'origin_hub'; }
+        else if (title.includes('Last') || title.includes('Dest SCs')) { leftFilterKey = 'dest_hub'; rightFilterKey = 'dest_sc'; }
+        else { leftFilterKey = 'origin_hub'; rightFilterKey = 'dest_hub'; }
+
+        sortedLeft.forEach(([n, v]) => {
+            const node = lPos[n];
+            const baseFlag = FLAGS[n.split('-')[0]] || '';
+            let nText = `${baseFlag} ${n}`;
+            svg += `<rect x="60" y="${node.y}" width="${nodeW}" height="${Math.max(2, node.h)}" fill="#f59e0b" stroke="#333" rx="2" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${leftFilterKey}', '${n}'); event.stopPropagation();"></rect>`;
+            svg += `<text x="55" y="${node.y + node.h/2}" dy="4" text-anchor="end" font-size="10" font-weight="bold" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${leftFilterKey}', '${n}'); event.stopPropagation();">${nText}</text>`;
+        });
+        sortedRight.forEach(([n, v]) => {
+            const node = rPos[n];
+            const baseFlag = FLAGS[n.split('-')[0]] || '';
+            let nText = `${n} ${baseFlag}`;
+            svg += `<rect x="${w - 60 - nodeW}" y="${node.y}" width="${nodeW}" height="${Math.max(2, node.h)}" fill="#f59e0b" stroke="#333" rx="2" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${rightFilterKey}', '${n}'); event.stopPropagation();"></rect>`;
+            svg += `<text x="${w - 55}" y="${node.y + node.h/2}" dy="4" text-anchor="start" font-size="10" font-weight="bold" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${rightFilterKey}', '${n}'); event.stopPropagation();">${nText}</text>`;
+        });
+
+        edges.forEach(e => {
+            const src = lPos[e.src]; const dst = rPos[e.dst]; const lw = e.vol * ky;
+            const y0 = src.y + src.offset + lw / 2; const x0 = 60 + nodeW;
+            const y1 = dst.y + dst.offset + lw / 2; const x1 = w - 60 - nodeW;
+            const xMid = (x0 + x1) / 2;
+            
+            let bColor = 'rgba(239, 68, 68, 0.4)'; let hColor = 'rgba(239, 68, 68, 0.8)';
+            if (e.perf1w !== null) {
+                if (e.perf1w >= 0.98) { bColor = 'rgba(16, 185, 129, 0.4)'; hColor = 'rgba(16, 185, 129, 0.8)'; }
+                else if (e.perf1w >= 0.95) { bColor = 'rgba(52, 211, 153, 0.4)'; hColor = 'rgba(52, 211, 153, 0.8)'; }
+                else if (e.perf1w >= 0.90) { bColor = 'rgba(251, 191, 36, 0.6)'; hColor = 'rgba(251, 191, 36, 1.0)'; }
+                else if (e.perf1w >= 0.80) { bColor = 'rgba(245, 158, 11, 0.6)'; hColor = 'rgba(245, 158, 11, 1.0)'; }
+            }
+            
+            const filterMap = {};
+            if (title.includes('First') || title.includes('Orig SCs')) { filterMap['origin_sc'] = e.src; filterMap['origin_hub'] = e.dst; }
+            else if (title.includes('Last') || title.includes('Dest SCs')) { filterMap['dest_hub'] = e.src; filterMap['dest_sc'] = e.dst; }
+            else { filterMap['origin_hub'] = e.src; filterMap['dest_hub'] = e.dst; }
+            const fStr = JSON.stringify(filterMap).replace(/"/g, '&quot;');
+            
+            const tooltipStr = `4W: ${e.perf4w !== null ? (e.perf4w*100).toFixed(1)+'%' : 'N/A'} | 1W: ${e.perf1w !== null ? (e.perf1w*100).toFixed(1)+'%' : 'N/A'}`;
+            svg += `<path d="M ${x0} ${y0} C ${xMid} ${y0}, ${xMid} ${y1}, ${x1} ${y1}" 
+                          fill="none" stroke="${bColor}" stroke-width="${Math.max(2, (e.vol / maxTotalVol) * 40)}" 
+                          style="transition: stroke 0.2s; cursor:pointer;" 
+                          onmouseover="this.setAttribute('stroke', '${hColor}')" 
+                          onmousemove="showSankeyHover(event, '${e.src}', '${e.dst}', ${e.vol}, '${tooltipStr}')"
+                          onmouseout="this.setAttribute('stroke', '${bColor}'); hideTooltip();"
+                          onclick="setMultiFilter(${fStr}); hideTooltip(); event.stopPropagation();">
+                    </path>`;
+            src.offset += lw; dst.offset += lw;
+        });
+        svg += `</svg>`;
+        return svg;
+    };
+
+        let fmTitle = 'Top 20 First Mile (SC ➔ Hub)';
+        let mmTitle = 'Top 10 Linehaul (Hub ➔ Hub)';
+        let lmTitle = 'Top 20 Last Mile (Hub ➔ SC)';
+
+        if (state.filters['origin_hub'] && state.filters['dest_hub']) {
+            fmTitle = `Top 20 Orig SCs for ${state.filters['origin_hub']} ➔ ${state.filters['dest_hub']} route`;
+            lmTitle = `Top 20 Dest SCs for ${state.filters['origin_hub']} ➔ ${state.filters['dest_hub']} route`;
+        } else if (state.filters['origin_hub']) {
+            fmTitle = `Top 20 Orig SCs to ${state.filters['origin_hub']}`;
+            lmTitle = `Top 20 Dest SCs out of ${state.filters['origin_hub']}`;
+        } else if (state.filters['dest_hub']) {
+            fmTitle = `Top 20 Orig SCs to ${state.filters['dest_hub']}`;
+            lmTitle = `Top 20 Dest SCs out of ${state.filters['dest_hub']}`;
+        }
+
+    container.innerHTML = `
+        <div style="display: flex; gap: 15px; width: 100%; justify-content: space-between; padding: 10px; background: #fff; border-radius: 8px;">
+            <div style="flex: 1; overflow: hidden; position:relative;">${buildSVG(fmFlow, 20, fmTitle)}</div>
+            <div style="flex: 1; overflow: hidden; position:relative; border-left: 2px solid #f0f0f0; border-right: 2px solid #f0f0f0; padding: 0 15px;">${buildSVG(mmFlow, 10, mmTitle)}</div>
+            <div style="flex: 1; overflow: hidden; position:relative;">${buildSVG(lmFlow, 20, lmTitle)}</div>
+        </div>
+    `;
+}
+
+function renderView6(data) {
+    const container = document.getElementById('view6-container');
+    if (!container) return;
+    if (!data.length) { container.innerHTML = '<div style="padding:15px; text-align:center;">No shipments match criteria.</div>'; return; }
+    
+    const topData = data.slice(0, 50); 
+    
+    let html = `<table class="dashboard-table" style="text-align:left;">
+        <thead style="background:#f4f5f7;">
+            <tr>
+                <th style="width: 15%">Tracking & Reference</th>
+                <th style="width: 15%">Routing Details</th>
+                <th style="width: 70%">Horizontal Execution Pipeline</th>
+            </tr>
+        </thead>
+        <tbody>`;
+        
+    topData.forEach((s, idx) => {
+        const rowKey = 'SHP' + String(idx).padStart(5, '0') + s.customer_name.substring(0,2).toUpperCase();
+        
+        let customNodes = s.is_cross_border ? ['Export Customs', 'Import Customs'] : [];
+        const trackNodes = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Linehaul', ...customNodes, 'Dest Hub', 'Dest SC', 'Out for Delivery'];
+        
+        let tlHtml = `<div style="display:flex; justify-content:space-between; align-items:flex-start; width:100%; border:1px solid #e1e4e8; border-radius:8px; padding:15px; background:#fafafa; overflow-x:auto;">`;
+        
+        trackNodes.forEach((nodeName, nIdx) => {
+            const isLast = nIdx === trackNodes.length - 1;
+            const hasScan = s.scan_history[nodeName];
+            const isFailurePoint = s.current_phase === 'Exception' && s.failed_phase === nodeName;
+            
+            let statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:#e0e0e0;border:2px solid #fff;box-shadow:0 0 0 1px #ccc;"></div>'; // Pending
+            let textColor = '#888';
+            let dateText = 'Pending';
+            let locText = '';
+            let lineBg = '#e0e0e0';
+
+            if (isFailurePoint) {
+                statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:var(--dhl-red);color:white;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;">❌</div>';
+                textColor = 'var(--dhl-red)';
+                dateText = `<strong style="color:var(--dhl-red)">${s.exception_cause || 'Failed'}</strong>`;
+                lineBg = 'var(--dhl-red)';
+                locText = hasScan ? hasScan.location : 'Transit';
+            } else if (hasScan) {
+                statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:#1b6300;color:white;display:flex;align-items:center;justify-content:center;font-size:10px;">✅</div>';
+                textColor = '#1b6300';
+                dateText = new Date(hasScan.time).toLocaleString('en-GB', { month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit' });
+                locText = hasScan.location;
+                lineBg = '#1b6300';
+            }
+
+            let shortNode = nodeName.replace('Customs', 'Cstm').replace('Delivery', 'Delv');
+            if (nodeName === 'Manifested') shortNode = 'Pick Up';
+            if (nodeName === 'First Mile') shortNode = 'Orig SC';
+            if (nodeName === 'Linehaul') shortNode = 'Orig Hub';
+
+            tlHtml += `
+            <div style="display:flex; flex-direction:column; align-items:center; position:relative; min-width:85px; text-align:center;">
+                <div style="font-size:11px; font-weight:700; color:#444; margin-bottom:8px; text-transform:uppercase; letter-spacing:0.5px;">${shortNode}</div>
+                <div style="position:relative; z-index:2; margin-bottom:8px;">
+                    ${statusIcon}
+                </div>
+                ${!isLast ? `<div style="position:absolute; top:28px; left:50%; width:100%; height:2px; background:${lineBg}; z-index:1;"></div>` : ''}
+                <div style="font-size:10px; color:${textColor}; font-family:monospace;">${dateText}</div>
+                <div style="font-size:9px; color:#666; font-weight:bold; margin-top:2px;">${locText}</div>
+            </div>`;
+        });
+        
+        tlHtml += `</div>`;
+
+        html += `<tr style="border-bottom: 1px solid #eee;">
+            <td style="vertical-align: middle;">
+                <div style="font-family: monospace; font-size:14px; font-weight:800; margin-bottom:6px; color:#111;">${rowKey}</div>
+                <div style="font-size:12px; margin-bottom: 3px; color:#444;"><strong>EDD:</strong> ${new Date(s.edd_timestamp).toLocaleDateString()}</div>
+                <div style="font-size:12px; color:#444;"><strong>Vol/SLA:</strong> ${s.product_type}</div>
+            </td>
+            <td style="vertical-align: middle;">
+                <div style="font-weight: 800; font-size:13px; margin-bottom: 6px; color: var(--dhl-red); letter-spacing: 0.5px;">${s.customer_name}</div>
+                <div style="font-size:12px; margin-bottom:3px; color:#333;"><strong>Org:</strong> ${s.origin_hub}</div>
+                <div style="font-size:12px; color:#333;"><strong>Dst:</strong> ${s.dest_hub}</div>
+            </td>
+            <td style="vertical-align: middle; padding: 10px;">${tlHtml}</td>
+        </tr>`;
+    });
+    html += `</tbody></table>`;
+    container.innerHTML = html;
+}
+
+function renderAll() {
+    renderBreadcrumbs();
+    renderKPICards();
+    const data = getFilteredData();
+    renderView1(data);
+    renderView2(data);
+    renderView3(data);
+    renderView4(data);
+    renderView5(data);
+    renderView6(data);
+    renderView7(data);
+    renderView8(data);
+    renderView9(data);
+    renderView10(data);
+}
+
+window.addEventListener('resize', () => { setTimeout(() => renderView9(getFilteredData()), 200); });
+
+function simulationTick() {
+    shipments.forEach(s => {
+        if(Math.random() < 0.08 && s.current_phase !== 'Delivered' && s.current_phase !== 'Exception') {
+            const idx = TIMELINE_PHASES.indexOf(s.current_phase);
+            if(idx < TIMELINE_PHASES.length - 1) { 
+                s.current_phase = TIMELINE_PHASES[idx + 1]; 
+                s.last_scan_timestamp = Date.now(); 
+                s.scan_history[s.current_phase] = { time: s.last_scan_timestamp, location: s.dest_sc };
+            }
+        }
+        if(Math.random() < 0.02 && s.current_phase !== 'Delivered') s.edd_timestamp += 86400000;
+    });
+    state.lastUpdated = new Date();
+    document.getElementById('lastUpdated').innerText = `Last Updated: ${state.lastUpdated.toLocaleTimeString()}`;
+    
+    
+    renderAll();
+    document.querySelectorAll('.card-content table').forEach(t => { t.classList.add('updated-cell'); setTimeout(() => t.classList.remove('updated-cell'), 1000); });
+}
+
+setInterval(() => { 
+    state.timer--; 
+    if(state.timer <= 0) { state.timer = 120; simulationTick(); } 
+    updateHeader(); 
+    if(Math.random() < 0.25) {
+        const viewers = document.getElementById('live-viewers');
+        if (viewers) viewers.innerText = randomInt(11, 24);
+    }
+}, 1000);
+function updateHeader() {
+    const cd = document.getElementById('countdownTimer');
+    if (cd) cd.innerText = state.timer + 's';
+}
+
+function initEventListeners() {
+    document.querySelectorAll('.toggle-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            state.filterScope = e.target.getAttribute('data-filter');
+            renderAll();
+        });
+    });
+}
+
+initData(); initEventListeners(); renderAll();
