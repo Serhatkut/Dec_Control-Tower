@@ -20,6 +20,46 @@
            <div class="modal-body" id="reds-list"></div>
        </div>
     </div>
+    
+    <!-- HELP MODAL -->
+    <div id="help-modal" class="modal-overlay" style="z-index: 10000; display: none;">
+       <div class="modal-content" style="max-width: 650px;">
+           <div class="modal-header">
+               <h2>ℹ️ Control Tower Overview & Alerts</h2>
+               <button class="close-btn" onclick="closeHelpModal()">×</button>
+           </div>
+           <div class="modal-body" style="font-size: 13px; line-height: 1.6; color: #f0f0f0;">
+                <h3 style="margin-bottom: 6px; color: var(--dhl-yellow);">📌 Dashboard Navigation</h3>
+                <ul style="padding-left: 20px; margin-bottom: 16px;">
+                    <li><strong>Sticky Header:</strong> Toggle the entire dashboard view between <i>Domestic</i> or <i>Cross-border</i> volume. Clicking the "Reds" button auto-traces massive bottlenecks.</li>
+                    <li><strong>Sticky Footer:</strong> Select your explicit Manager Role. <i>Hub Managers</i> will be required to select a specific base station to filter inbound/outbound traffic. <i>Network Managers</i> can observe the entire operation.</li>
+                    <li><strong>Breaking News Ticker:</strong> Hover to pause the scrolling matrix. <strong>Click any alert</strong> to instantly isolate that bottleneck and snap the dashboard to those specific failing parcels!</li>
+                </ul>
+
+                <h3 style="margin-bottom: 6px; color: var(--dhl-yellow);">🚨 Key Performance Indicators (KPIs)</h3>
+                <ul style="padding-left: 20px; margin-bottom: 16px;">
+                    <li><strong>OTD (On Time Delivery):</strong> Each parcel receives an internal Expected Delivery Date (EDD) constraint derived directly from target SLAs. A parcel rigidly fails OTD if its actual final-scan Delivered Timestamp misses that EDD deadline.</li>
+                    <li><strong>OTP (On Time Pick Up):</strong> Manifested parcels must be successfully scanned physically loaded within a rigid 24 Hour window.</li>
+                    <li><strong>NOP (Network On Time):</strong> Flagged negatively if a shipment absorbs a "Customs Hold" or "Network Transit Exception".</li>
+                </ul>
+
+                <h3 style="margin-bottom: 6px; color: var(--dhl-yellow);">🔴 Anomaly Detection Algorithm (The Reds)</h3>
+                <p>The internal anomaly engine deeply indexes all Active Pipeline Parcels continuously and scores volumetric failure ratios. It detects clusters of extreme stagnation and visually pulls the absolute worst-performing Customer Account, Origin Depot bottleneck, Mid-Mile linehaul Transit Route, or End-Hub Exception, guaranteeing Operations Managers instantly notice massive critical blackouts.</p>
+           </div>
+       </div>
+    </div>
+
+    <!-- TICKET MODAL -->
+    <div id="ticket-modal" class="modal-overlay" style="z-index: 10000; display: none;">
+       <div class="modal-content" style="max-width: 800px;">
+           <div class="modal-header">
+               <h2>🎫 Role Inbox: Assigned Operational Tickets</h2>
+               <button class="close-btn" onclick="closeTicketModal()">×</button>
+           </div>
+           <div class="modal-body" id="ticket-list" style="display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto;"></div>
+       </div>
+    </div>
+
     <div class="dashboard-container">
         <!-- HEADER -->
         <header class="dashboard-header">
@@ -48,10 +88,21 @@
                         <div class="timer" style="font-size: 14px; margin-bottom: 2px;">🔴 LIVE <span id="countdownTimer">00:00</span></div>
                         <div class="last-updated" id="lastUpdated" style="font-size: 10px;">Last Updated: --:--</div>
                     </div>
-                    <button id="findRedsBtn" class="btn-alert" onclick="autoFilterWorst()" title="Auto-find worst performing network segment">🚨 Show Me The Reds</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button id="inboxBtn" class="btn-alert" onclick="showTicketInbox()" style="background-color: #ff6600; color: #111; cursor: pointer; box-shadow: 0 0 10px rgba(255,102,0,0.5);">🎫 Inbox (0)</button>
+                        <button id="helpBtn" class="btn-info" onclick="showHelpModal()" title="How to use this dashboard and read alerts">ℹ️ Help</button>
+                    </div>
                 </div>
             </div>
         </header>
+
+        <!-- NEWS TICKER -->
+        <div class="news-ticker-container" style="display: flex; align-items: center;">
+            <div style="flex-grow: 1; overflow: hidden; position: relative;">
+                <div class="news-ticker" id="newsTickerContent"></div>
+            </div>
+            <button id="findRedsBtn" class="btn-alert" onclick="autoFilterWorst()" title="Auto-find worst performing network segment" style="margin-right: 12px; margin-left: 12px; flex-shrink: 0; white-space: nowrap; z-index: 10;">🚨 Show Me The Reds</button>
+        </div>
 
         <!-- DASHBOARD GRID -->
         <main class="dashboard-grid">
@@ -238,7 +289,8 @@
                 <div class="select-wrapper">
                     <select id="roleSelect" class="dashboard-select" onchange="handleRoleChange(this.value)">
                         <option value="admin">Control Tower Admin</option>
-                        <option value="linehaul">Line Haul Manager</option>
+                        <option value="network_manager">Linehaul / Network Manager</option>
+                        <option value="hub_manager">Hub Manager</option>
                         <option value="keyaccount">Key Account Manager</option>
                         <option value="sc_manager">Service Center Manager</option>
                     </select>
@@ -272,6 +324,6 @@
     </div>
 
     <!-- Application Logic -->
-    <script src="app.js"></script>
+    <script src="app.js?v=1708"></script>
 </body>
 </html>

@@ -49,14 +49,22 @@ function generateShipment() {
 
     let sla_hours, ctd_hours;
     if (is_domestic) {
-        sla_hours = randomInt(24, 48);
+        sla_hours = randomChoice([24, 48]);
         ctd_hours = randomChoice([32, 35, 38, 40]);
     } else if (is_inner_eu) {
-        sla_hours = randomInt(48, 72);
+        sla_hours = randomChoice([48, 72]);
         ctd_hours = randomChoice([50, 55, 60, 65]);
     } else {
-        sla_hours = randomInt(72, 192);
+        sla_hours = randomChoice([96, 120, 144, 168]);
         ctd_hours = randomChoice([80, 100, 120, 150]);
+    }
+
+    // Force global KPIs dynamically (OTD ~ 90-95%)
+    const failsOtd = Math.random() > 0.92;
+    if (failsOtd) {
+        if (ctd_hours <= sla_hours) ctd_hours = sla_hours + randomInt(12, 48);
+    } else {
+        if (ctd_hours > sla_hours) ctd_hours = sla_hours - randomInt(2, 24);
     }
 
     const now = Date.now();
@@ -64,15 +72,21 @@ function generateShipment() {
     const isException = Math.random() < 0.04;
     
     let manifested_time, edd_timestamp, current_phase;
+    let computedEddOffsetDays = 0;
 
     if (!isPending) {
         let delivered_time = now - (Math.random() * 14 * 86400000);
         manifested_time = delivered_time - (ctd_hours * 3600000);
         edd_timestamp = manifested_time + (sla_hours * 3600000);
     } else {
-        let pt = Math.random(); let eddOffsetDays;
-        if (pt < 0.5) eddOffsetDays = 0; else if (pt < 0.8) eddOffsetDays = 1; else if (pt < 0.9) eddOffsetDays = 2; else eddOffsetDays = randomInt(-3, -1);
-        edd_timestamp = now + (eddOffsetDays * 86400000) + randomInt(-12, 12)*3600000;
+        let pt = Math.random(); 
+        if (pt < 0.45) computedEddOffsetDays = 0; 
+        else if (pt < 0.70) computedEddOffsetDays = 1; 
+        else if (pt < 0.80) computedEddOffsetDays = 2; 
+        else if (pt < 0.90) computedEddOffsetDays = randomInt(3, 8); // Future volume
+        else computedEddOffsetDays = randomInt(-3, -1); // Past volume
+        
+        edd_timestamp = now + (computedEddOffsetDays * 86400000) + randomInt(-12, 12)*3600000;
         manifested_time = edd_timestamp - (sla_hours * 3600000);
         if (manifested_time > now) {
             let diff = manifested_time - now + randomInt(3600000, 10800000);
@@ -91,7 +105,13 @@ function generateShipment() {
     let progress = (now - manifested_time) / (ctd_hours * 3600000);
     if (!isPending) progress = 1.0;
     if (progress < 0) progress = 0;
-    if (isPending && progress >= 1.0) progress = 0.99;
+    
+    // Force some past-due pending parcels to be artificially "stuck" near Origin
+    if (isPending && computedEddOffsetDays < 0 && Math.random() < 0.35) {
+        progress = (Math.random() * 0.30) + 0.05; // Keep them between 0.05 - 0.35 (Pick Up / Origin Hub / Export)
+    } else if (isPending && progress >= 1.0) {
+        progress = 0.99;
+    }
 
     const active_phases = TIMELINE_PHASES.filter(p => p_off[p] !== undefined);
     current_phase = active_phases[0];
@@ -132,6 +152,19 @@ function generateShipment() {
         last_scan_time = sim_time;
     }
 
+    // Force Exception for > 2 days physical stagnation
+    if (isPending && current_phase !== 'Exception' && current_phase !== 'Linehaul') {
+        const hoursStagnant = (now - last_scan_time) / 3600000;
+        if (hoursStagnant > 48) {
+            failed_phase = current_phase;
+            current_phase = 'Exception';
+            if (failed_phase === 'Out for Delivery') exception_cause = randomChoice(['Bad Address', 'Customer Refused', 'Damaged / Repacked']);
+            else if (failed_phase === 'Dest SC' || failed_phase === 'Origin SC') exception_cause = randomChoice(['Pick up not successful', 'Volume Lost', 'Damaged in Node']);
+            else if (failed_phase === 'Import Customs' || failed_phase === 'Export Customs') exception_cause = 'Customs Hold';
+            else exception_cause = randomChoice(['Damaged in Hub', 'Routing Error - Mis-sort']);
+        }
+    }
+
     return {
         shipment_id: crypto.randomUUID(), customer_name: randomChoice(CUSTOMERS), product_type: randomChoice(PRODUCT_TYPES),
         origin_hub: origin_hub, dest_hub: dest_hub, origin_sc: origin_sc, dest_sc: dest_sc,
@@ -153,18 +186,138 @@ function showToast(html) {
     window.toastTimeout = setTimeout(() => { t.classList.remove('show'); }, 6000);
 }
 
+window.alertHighlightTarget = null;
+
 function applyRedFilter(element, filterJsonStr) {
     const filters = JSON.parse(filterJsonStr.replace(/&quot;/g, '"'));
+    
+    if (filters.customer_name) window.alertHighlightTarget = { type: 'customer_name', value: filters.customer_name };
+    else if (filters.edd_bucket && filters.current_phase) window.alertHighlightTarget = { type: 'matrix', value: `${filters.edd_bucket}-${filters.current_phase}` };
+    else if (filters.origin_sc) window.alertHighlightTarget = { type: 'origin_sc', value: filters.origin_sc };
+    else if (filters.dest_sc) window.alertHighlightTarget = { type: 'dest_sc', value: filters.dest_sc };
+    else if (filters.dest_hub && !filters.origin_hub) window.alertHighlightTarget = { type: 'dest_hub', value: filters.dest_hub };
+
     state.filters = {}; state.filterScope = 'All';
     document.querySelectorAll('.toggle-btn').forEach(b => b.classList.remove('active'));
     document.querySelector('[data-filter="All"]').classList.add('active');
     
     state.filters = filters; renderAll();
     closeRedsModal();
+    if (typeof closeTicketModal === 'function') closeTicketModal();
     const fStr = Object.values(filters).join(' & ');
     showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:var(--dhl-yellow);">🚨 Critical Bottleneck Isolated</div>Filters Applied: <strong>${fStr}</strong>`);
 }
+
+function triggerAlertFlash(target) {
+    setTimeout(() => {
+        const selector = `[data-flash-type="${target.type}"][data-flash-value="${target.value}"]`;
+        const elements = document.querySelectorAll(selector);
+        elements.forEach(el => {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (el.tagName.toLowerCase() === 'tr' || el.tagName.toLowerCase() === 'td') {
+                el.classList.add('flash-html');
+                setTimeout(() => el.classList.remove('flash-html'), 4000);
+            } else {
+                el.classList.add('flash-svg');
+                setTimeout(() => el.classList.remove('flash-svg'), 4000);
+            }
+        });
+    }, 100);
+}
 function closeRedsModal() { document.getElementById('reds-modal').style.display = 'none'; }
+function showHelpModal() { document.getElementById('help-modal').style.display = 'flex'; }
+function closeHelpModal() { document.getElementById('help-modal').style.display = 'none'; }
+
+// --- TICKETING SYSTEM ---
+let SYSTEM_TICKETS = [];
+let ticketIdCounter = 1000;
+
+function createTicket(type, title, desc, filter, role, entity, auto=false) {
+    const existing = SYSTEM_TICKETS.find(t => t.title === title);
+    if(existing) return; // Prevent duplicates in active session
+    
+    SYSTEM_TICKETS.push({
+        id: `TKT-${ticketIdCounter++}`,
+        type, title, desc, filter, role, entity,
+        status: 'OPEN',
+        autoGenerated: auto,
+        timestamp: new Date()
+    });
+    showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:var(--dhl-yellow);">🎫 Ticket Dispatched</div>${title} assigned to ${role.replace('_', ' ').toUpperCase()}`);
+}
+
+function manualTicket(idx, type, title, desc, filterJson, role, entity) {
+    createTicket(type, title, desc, JSON.parse(filterJson), role, entity, false);
+    document.getElementById(`ticket-btn-${idx}`).outerHTML = `<span style="color:var(--dhl-yellow); font-size:11px; font-weight:bold;">🎫 Ticket Created</span>`;
+    updateInboxCount();
+}
+
+function updateInboxCount() {
+    const role = document.getElementById('roleSelect').value;
+    const entity = document.getElementById('entitySelect').value;
+    
+    let visible = SYSTEM_TICKETS;
+    if(role !== 'admin') {
+        visible = visible.filter(t => t.role === role);
+        if(document.getElementById('entityWrapper').style.display !== 'none' && entity && entity !== 'All') {
+            visible = visible.filter(t => t.entity === entity);
+        }
+    }
+    const openCount = visible.filter(t => t.status === 'OPEN').length;
+    const btn = document.getElementById('inboxBtn');
+    if(btn) btn.innerHTML = `🎫 Inbox (${openCount})`;
+}
+
+function showTicketInbox() {
+    const role = document.getElementById('roleSelect').value;
+    const entity = document.getElementById('entitySelect').value;
+    
+    let visible = SYSTEM_TICKETS;
+    if(role !== 'admin') {
+        visible = visible.filter(t => t.role === role);
+        if(document.getElementById('entityWrapper').style.display !== 'none' && entity && entity !== 'All') {
+            visible = visible.filter(t => t.entity === entity);
+        }
+    }
+
+    const list = document.getElementById('ticket-list');
+    if(visible.length === 0) {
+        list.innerHTML = '<div style="color:#666; font-style:italic;">Inbox empty. No tickets assigned to your role/entity.</div>';
+    } else {
+        list.innerHTML = visible.reverse().map(t => {
+            const isAutoStr = t.autoGenerated ? `<span style="background:var(--dhl-red); color:#fff; padding:2px 6px; border-radius:4px; font-size:10px;">AUTO-GENERATED</span>` : `<span style="background:var(--dhl-yellow); color:#000; padding:2px 6px; border-radius:4px; font-size:10px;">MANUAL</span>`;
+            const statusColor = t.status === 'OPEN' ? 'var(--dhl-red)' : '#00cc66';
+            const filterStr = JSON.stringify(t.filter).replace(/"/g, '&quot;');
+            
+            return `<div class="red-item" style="border-left: 4px solid ${statusColor}; margin-bottom: 8px;">
+                        <div class="red-content">
+                            <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
+                                <div style="font-weight:bold; font-size:12px; color:#aaa;">${t.id} - ${isAutoStr}</div>
+                                <div style="font-weight:bold; font-size:12px; color:${statusColor};">${t.status}</div>
+                            </div>
+                            <div class="red-title">${t.title}</div>
+                            <div class="red-desc" style="color:#aaa;">${t.desc} | Entity: ${t.entity}</div>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:4px; margin-left:16px;">
+                            <button class="red-action-btn" onclick="applyRedFilter(this, '${filterStr}')" style="width:100%;">Isolate</button>
+                            ${t.status === 'OPEN' ? `<button class="red-action-btn" style="background:#00cc66; border:none; color:#fff; width:100%;" onclick="resolveTicket('${t.id}')">Resolve</button>` : ''}
+                        </div>
+                    </div>`;
+        }).join('');
+    }
+    document.getElementById('ticket-modal').style.display = 'flex';
+}
+
+function resolveTicket(tId) {
+    const t = SYSTEM_TICKETS.find(x => x.id === tId);
+    if(t) { 
+        t.status = 'RESOLVED'; 
+        updateInboxCount(); 
+        showTicketInbox(); 
+        showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:#00cc66;">✅ Ticket Closed</div>${t.id} marked as resolved.`);
+    }
+}
+function closeTicketModal() { document.getElementById('ticket-modal').style.display = 'none'; }
 
 function autoFilterWorst() {
     let cust = {}; let fm = {}; let mm = {}; let lm = {}; let exc = {};
@@ -192,19 +345,22 @@ function autoFilterWorst() {
         }
     });
 
-    const getWorst = (obj, minV) => Object.entries(obj).filter(x=>x[1].e >= minV).map(x=>({k:x[0], score:x[1].s/x[1].e, ...x[1]})).sort((a,b)=>a.score-b.score)[0];
-    const topCust = getWorst(cust, 5);
-    const topFm = getWorst(fm, 5);
-    const topMm = getWorst(mm, 5);
-    const topLm = getWorst(lm, 5);
-    const topExc = Object.entries(exc).sort((a,b)=>b[1]-a[1])[0];
+    const getWorstCollection = (obj, minV) => Object.entries(obj).filter(x=>x[1].e >= minV).map(x=>({k:x[0], fails:x[1].e - x[1].s, score:x[1].s/x[1].e, ...x[1]})).sort((a,b)=>b.fails - a.fails);
+    
+    let allIssues = [];
+    getWorstCollection(cust, 5).slice(0, 3).forEach(c => allIssues.push({type:'Customer', title:`Customer: ${c.k}`, desc:'Severe End-to-End OTD underperformance', score:c.score, fails:c.fails, filter:{customer_name: c.k}, role:'keyaccount', entity: c.k}));
+    getWorstCollection(fm, 5).slice(0, 3).forEach(f => allIssues.push({type:'FirstMile', title:`Origin SC: ${f.k}`, desc:'First Mile Pickup Bottleneck', score:f.score, fails:f.fails, filter:{origin_sc: f.k}, role:'sc_manager', entity: f.k}));
+    getWorstCollection(mm, 5).slice(0, 3).forEach(m => allIssues.push({type:'MidMile', title:`Route: ${m.k}`, desc:'Linehaul Network Delay', score:m.score, fails:m.fails, filter:{origin_hub: m.oh, dest_hub: m.dh}, role:'network_manager', entity: m.k}));
+    getWorstCollection(lm, 5).slice(0, 3).forEach(l => allIssues.push({type:'LastMile', title:`Dest SC: ${l.k}`, desc:'Last Mile Delivery Risk', score:l.score, fails:l.fails, filter:{dest_sc: l.k}, role:'sc_manager', entity: l.k}));
+    
+    Object.entries(exc).sort((a,b)=>b[1]-a[1]).slice(0, 3).forEach(e => allIssues.push({type:'System', title:`Dest Hub: ${e[0]}`, desc:`Concentration of ${e[1]} Exceptions`, score:0, fails:e[1], filter:{dest_hub: e[0], current_phase: 'Exception'}, isCount:true, count:e[1], role:'hub_manager', entity: e[0]}));
 
-    const topIssues = [];
-    if(topCust) topIssues.push({type:'Customer', title:`Customer: ${topCust.k}`, desc:'Severe End-to-End OTD underperformance', score:topCust.score, filter:{customer_name: topCust.k}});
-    if(topFm) topIssues.push({type:'FirstMile', title:`Origin SC: ${topFm.k}`, desc:'First Mile Pickup Bottleneck', score:topFm.score, filter:{origin_sc: topFm.k}});
-    if(topMm) topIssues.push({type:'MidMile', title:`Route: ${topMm.k}`, desc:'Linehaul Network Delay', score:topMm.score, filter:{origin_hub: topMm.oh, dest_hub: topMm.dh}});
-    if(topLm) topIssues.push({type:'LastMile', title:`Dest SC: ${topLm.k}`, desc:'Last Mile Delivery Risk', score:topLm.score, filter:{dest_sc: topLm.k}});
-    if(topExc) topIssues.push({type:'System', title:`Dest Hub: ${topExc[0]}`, desc:`Concentration of ${topExc[1]} Exceptions`, score:0, filter:{dest_hub: topExc[0], current_phase: 'Exception'}, isCount:true, count:topExc[1]});
+    // Sort absolutely everything by raw fail volume and take top 10
+    allIssues.sort((a,b) => b.fails - a.fails);
+    const topIssues = allIssues.slice(0, 10);
+
+    // Auto-ticket top 3
+    topIssues.slice(0, 3).forEach(iss => createTicket(iss.type, iss.title, iss.desc, iss.filter, iss.role, iss.entity, true));
 
     const list = document.getElementById('reds-list');
     if (topIssues.length === 0) list.innerHTML = '<div style="color:#666; font-style:italic;">No critical bottlenecks found.</div>';
@@ -213,14 +369,25 @@ function autoFilterWorst() {
             let icon = '🚨';
             if(iss.type==='FirstMile') icon='📍'; else if(iss.type==='MidMile') icon='🚛'; else if(iss.type==='LastMile') icon='🚚'; else if(iss.type==='Customer') icon='🏢';
             let scoreStr = iss.isCount ? `${iss.count} Cases` : formatPercent(iss.score);
+            
+            const isAuto = idx < 3;
+            const filterStr = JSON.stringify(iss.filter).replace(/"/g, '&quot;');
+            
+            let ticketAction = isAuto 
+                ? `<span style="color:var(--dhl-red); font-size:11px; font-weight:bold; margin-right:8px;">[Auto-Ticketed]</span>`
+                : `<button class="red-action-btn" id="ticket-btn-${idx}" onclick="manualTicket(${idx}, '${iss.type}', '${iss.title}', '${iss.desc}', '${filterStr}', '${iss.role}', '${iss.entity}')" style="background:transparent; border:1px solid var(--dhl-yellow); color:var(--dhl-yellow); margin-right:8px;">🎫 Create Ticket</button>`;
+            
             return `<div class="red-item">
                         <div class="red-icon">${icon}</div>
                         <div class="red-content">
                             <div class="red-title">${iss.title}</div>
-                            <div class="red-desc">${iss.desc}</div>
+                            <div class="red-desc">${iss.desc} - Map to: ${iss.role.toUpperCase()}</div>
                         </div>
-                        <div class="red-score" style="color:var(--dhl-red);">${scoreStr}</div>
-                        <button class="red-action-btn" id="isolate-btn-${idx}" data-filter="${JSON.stringify(iss.filter).replace(/"/g, '&quot;')}">Isolate</button>
+                        <div class="red-score" style="color:var(--dhl-red); padding-right:16px;">${scoreStr}</div>
+                        <div style="display:flex; align-items:center;">
+                            ${ticketAction}
+                            <button class="red-action-btn" id="isolate-btn-${idx}" data-filter="${filterStr}">Isolate</button>
+                        </div>
                     </div>`;
         }).join('');
         setTimeout(() => {
@@ -322,7 +489,13 @@ function getShipmentOTDStats(s) {
     const isEligible = dayOffset >= 1 && dayOffset <= 56;
     let isOtdSuccess = true; let expOtdScore = 1;
 
-    if (s.current_phase !== 'Delivered') {
+    if (s.current_phase === 'Delivered') {
+        const delivTs = s.scan_history['Delivered']?.time || s.last_scan_timestamp;
+        const delivMid = getMidnight(delivTs);
+        if (delivMid > eddMid) {
+            isOtdSuccess = false; 
+        }
+    } else {
         if (s.exception_cause === 'Damaged in Transit' || s.exception_cause === 'Customer Claim') {
             isOtdSuccess = false; expOtdScore = 0;
         } else if (dayOffset === 0 && (s.current_phase === 'Pick Up' || s.current_phase === 'Manifested')) {
@@ -341,7 +514,7 @@ function getShipmentNOPStats(s) {
     const isEligible = dayOffset >= 1 && dayOffset <= 56;
     let isNopSuccess = true;
     if (s.current_phase === 'Exception' && ['Weather Delay', 'Customs Hold'].includes(s.exception_cause)) isNopSuccess = false;
-    if (isNopSuccess && Math.random() > 0.985) isNopSuccess = false;
+    if (isNopSuccess && Math.random() > 0.99) isNopSuccess = false;
     return { isEligible, isNopSuccess };
 }
 
@@ -365,7 +538,11 @@ function getShipmentOTPStats(s) {
     if (s.scan_history['Pick Up']) pickupTs = s.scan_history['Pick Up'].time;
     else if (s.scan_history['Export Customs']) pickupTs = s.scan_history['Export Customs'].time;
     if (!pickupTs) return {isEligible: false};
-    const isOtpSuccess = (pickupTs - orderTs) <= (24 * 3600000); 
+    
+    // OTP threshold is 24h, artificially induce extremely rare 0.2% failures for reality
+    let isOtpSuccess = (pickupTs - orderTs) <= (24 * 3600000); 
+    if (isOtpSuccess && Math.random() > 0.998) isOtpSuccess = false;
+    
     return {isEligible: true, isOtpSuccess};
 }
 
@@ -381,22 +558,23 @@ function handleRoleChange(role) {
     const dirWrapper = document.getElementById('directionWrapper');
     select.innerHTML = '';
     
-    if (role === 'admin' || !role) {
+    if (role === 'admin' || role === 'network_manager' || !role) {
         wrapper.style.display = 'none';
         if(dirWrapper) dirWrapper.style.display = 'none';
+        updateInboxCount();
         renderAll();
         return;
     }
     
     wrapper.style.display = 'block';
     
-    if (role === 'linehaul' || role === 'sc_manager') {
+    if (role === 'hub_manager' || role === 'sc_manager') {
         if(dirWrapper) dirWrapper.style.display = 'block';
     } else {
         if(dirWrapper) dirWrapper.style.display = 'none';
     }
     let options = [];
-    if (role === 'linehaul') {
+    if (role === 'hub_manager') {
         options = HUBS.slice();
     } else if (role === 'keyaccount') {
         options = CUSTOMERS.slice();
@@ -407,11 +585,13 @@ function handleRoleChange(role) {
     }
     
     select.innerHTML = '<option value="">-- Mandatory: Select Entity --</option>' + options.map(o => `<option value="${o}">${o}</option>`).join('');
+    updateInboxCount();
     renderAll();
 }
 
 function handleEntityChange(entity) {
     state.roleEntity = entity || null;
+    updateInboxCount();
     renderAll();
 }
 
@@ -426,7 +606,19 @@ function setFilter(key, value) {
 function setMultiFilter(filterObj) {
     for (const [key, value] of Object.entries(filterObj)) {
         if (state.filters[key] === value) delete state.filters[key]; else state.filters[key] = value;
-    } renderAll();
+    }
+    
+    // Trap highlight payloads dynamically from Ticker or Map Clicks
+    const keys = Object.keys(filterObj);
+    if(keys.includes('customer_name')) window.alertHighlightTarget = { type: 'customer_name', value: filterObj.customer_name };
+    else if(keys.includes('edd_bucket') && keys.includes('current_phase')) window.alertHighlightTarget = { type: 'matrix', value: `${filterObj.edd_bucket}-${filterObj.current_phase}` };
+    else if(keys.includes('origin_sc') && !keys.includes('dest_hub')) window.alertHighlightTarget = { type: 'origin_sc', value: filterObj.origin_sc };
+    else if(keys.includes('dest_sc') && !keys.includes('dest_hub')) window.alertHighlightTarget = { type: 'dest_sc', value: filterObj.dest_sc };
+    else if(keys.includes('dest_hub') && keys.includes('origin_hub')) window.alertHighlightTarget = { type: 'route', value: `${filterObj.origin_hub}➔${filterObj.dest_hub}` };
+    else if(keys.includes('dest_hub')) window.alertHighlightTarget = { type: 'dest_hub', value: filterObj.dest_hub };
+    else if(keys.includes('origin_hub')) window.alertHighlightTarget = { type: 'origin_hub', value: filterObj.origin_hub };
+
+    renderAll();
 }
 function clearFilters() {
     state.filters = {}; state.filterScope = 'All';
@@ -435,7 +627,7 @@ function clearFilters() {
 }
 function getFilteredData() {
     return shipments.filter(s => {
-        if (state.role === 'linehaul' && state.roleEntity) {
+        if (state.role === 'hub_manager' && state.roleEntity) {
             let match = false;
             if (state.roleDirection === 'both') match = (s.origin_hub === state.roleEntity || s.dest_hub === state.roleEntity);
             else if (state.roleDirection === 'inbound') match = (s.dest_hub === state.roleEntity);
@@ -449,7 +641,7 @@ function getFilteredData() {
             if (!match) return false;
         } else if (state.role === 'keyaccount' && state.roleEntity) {
             if (s.customer_name !== state.roleEntity) return false;
-        } else if (state.role !== 'admin' && !state.roleEntity) {
+        } else if (state.role !== 'admin' && state.role !== 'network_manager' && !state.roleEntity) {
             return false;
         }
 
@@ -458,7 +650,10 @@ function getFilteredData() {
         for (const [key, value] of Object.entries(state.filters)) {
             if (key === 'is_pending') { if (value && s.current_phase === 'Delivered') return false; }
             else if (key === 'edd_bucket') { if (getEDDBucket(s.edd_timestamp) !== value) return false; }
-            else if (key === 'scan_group') { if (getScanGroupDay(getScanAgingBucket(s.last_scan_timestamp)) !== value) return false; }
+            else if (key === 'scan_group') { 
+                if (s.current_phase === 'Delivered') return false;
+                if (getScanGroupDay(getScanAgingBucket(s.last_scan_timestamp)) !== value) return false; 
+            }
             else if (s[key] !== value) return false;
         } return true;
     });
@@ -730,6 +925,7 @@ function renderView1(data) {
             const heatmapStyle = p === 'Delivered' ? '' : getHeatmapBg(val, maxVal);
             
             html += `<td class="numeric ${hiddenClass} ${bgAlertClass} ${isActiveCell} ${actionClass}" 
+                         data-flash-type="matrix" data-flash-value="${edd}-${p}"
                          style="cursor:pointer; text-align:center; ${heatmapStyle}"  
                          onclick="setMultiFilter({edd_bucket: '${edd}', current_phase: '${p}'}); event.stopPropagation();">
                         ${val > 0 ? formatNumber(val) : '-'}</td>`;
@@ -902,7 +1098,7 @@ function buildAnalyticsTable(data, entityKey, entityTitle, entityArray = null) {
         const otd = r.otdEligible > 0 ? r.otdSuccess / r.otdEligible : null;
         const expOtd = r.expCount > 0 ? r.expSum / r.expCount : null;
         const isActive = state.filters[entityKey] === r.name ? 'active-filter' : '';
-        html += `<tr class="${isActive}" style="height: 44px; cursor: pointer;" onclick="setFilter('${entityKey}', '${r.name}');">
+        html += `<tr class="${isActive}" data-flash-type="${entityKey}" data-flash-value="${r.name}" style="height: 44px; cursor: pointer;" onclick="setFilter('${entityKey}', '${r.name}');">
             <td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding: 4px;" title="${r.name}">${r.name}</td>
             <td class="numeric center" style="position:relative; z-index:1; padding: 4px;">
                 <div style="position:absolute; right:0; top:2px; bottom:2px; width:${share*100}%; background:rgba(255,204,0,0.3); z-index:-1; border-radius:4px;"></div>
@@ -1017,14 +1213,14 @@ function renderView9(data) {
             const node = lPos[n];
             const baseFlag = FLAGS[n.split('-')[0]] || '';
             let nText = `${baseFlag} ${n}`;
-            svg += `<rect x="60" y="${node.y}" width="${nodeW}" height="${Math.max(2, node.h)}" fill="#f59e0b" stroke="#333" rx="2" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${leftFilterKey}', '${n}'); event.stopPropagation();"></rect>`;
+            svg += `<rect x="60" y="${node.y}" width="${nodeW}" height="${Math.max(2, node.h)}" data-flash-type="${leftFilterKey}" data-flash-value="${n}" fill="#f59e0b" stroke="#333" rx="2" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${leftFilterKey}', '${n}'); event.stopPropagation();"></rect>`;
             svg += `<text x="55" y="${node.y + node.h/2}" dy="4" text-anchor="end" font-size="10" font-weight="bold" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${leftFilterKey}', '${n}'); event.stopPropagation();">${nText}</text>`;
         });
         sortedRight.forEach(([n, v]) => {
             const node = rPos[n];
             const baseFlag = FLAGS[n.split('-')[0]] || '';
             let nText = `${n} ${baseFlag}`;
-            svg += `<rect x="${w - 60 - nodeW}" y="${node.y}" width="${nodeW}" height="${Math.max(2, node.h)}" fill="#f59e0b" stroke="#333" rx="2" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${rightFilterKey}', '${n}'); event.stopPropagation();"></rect>`;
+            svg += `<rect x="${w - 60 - nodeW}" y="${node.y}" width="${nodeW}" height="${Math.max(2, node.h)}" data-flash-type="${rightFilterKey}" data-flash-value="${n}" fill="#f59e0b" stroke="#333" rx="2" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${rightFilterKey}', '${n}'); event.stopPropagation();"></rect>`;
             svg += `<text x="${w - 55}" y="${node.y + node.h/2}" dy="4" text-anchor="start" font-size="10" font-weight="bold" style="cursor:pointer;" onmousemove="showNodeHover(event, '${n}', ${v})" onmouseout="hideTooltip()" onclick="setFilter('${rightFilterKey}', '${n}'); event.stopPropagation();">${nText}</text>`;
         });
 
@@ -1050,6 +1246,7 @@ function renderView9(data) {
             
             const tooltipStr = `4W: ${e.perf4w !== null ? (e.perf4w*100).toFixed(1)+'%' : 'N/A'} | 1W: ${e.perf1w !== null ? (e.perf1w*100).toFixed(1)+'%' : 'N/A'}`;
             svg += `<path d="M ${x0} ${y0} C ${xMid} ${y0}, ${xMid} ${y1}, ${x1} ${y1}" 
+                          data-flash-type="route" data-flash-value="${e.src}➔${e.dst}"
                           fill="none" stroke="${bColor}" stroke-width="${Math.max(2, (e.vol / maxTotalVol) * 40)}" 
                           style="transition: stroke 0.2s; cursor:pointer;" 
                           onmouseover="this.setAttribute('stroke', '${hColor}')" 
@@ -1108,7 +1305,7 @@ function renderView6(data) {
         const rowKey = 'SHP' + String(idx).padStart(5, '0') + s.customer_name.substring(0,2).toUpperCase();
         
         let customNodes = s.is_cross_border ? ['Export Customs', 'Import Customs'] : [];
-        const trackNodes = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Linehaul', ...customNodes, 'Dest Hub', 'Dest SC', 'Out for Delivery'];
+        const trackNodes = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Linehaul', ...customNodes, 'Dest Hub', 'Dest SC', 'Out for Delivery', 'Delivered'];
         
         let tlHtml = `<div style="display:flex; justify-content:space-between; align-items:flex-start; width:100%; border:1px solid #e1e4e8; border-radius:8px; padding:15px; background:#fafafa; overflow-x:auto;">`;
         
@@ -1188,6 +1385,64 @@ function renderAll() {
     renderView8(data);
     renderView9(data);
     renderView10(data);
+    renderNewsTicker(data);
+
+    if (window.alertHighlightTarget) {
+        triggerAlertFlash(window.alertHighlightTarget);
+        window.alertHighlightTarget = null;
+    }
+}
+
+// --- NEWS TICKER ---
+function renderNewsTicker(data) {
+    let cust = {}; let fm = {}; let mm = {}; let lm = {}; let exc = {};
+    
+    data.forEach(s => {
+        if (!cust[s.customer_name]) cust[s.customer_name] = {e:0, s:0};
+        const otd = getShipmentOTDStats(s);
+        if(otd.isEligible) { cust[s.customer_name].e++; if(otd.isOtdSuccess) cust[s.customer_name].s++; }
+        
+        if (!fm[s.origin_sc]) fm[s.origin_sc] = {e:0, s:0};
+        const otp = getShipmentOTPStats(s);
+        if(otp.isEligible) { fm[s.origin_sc].e++; if(otp.isOtpSuccess) fm[s.origin_sc].s++; }
+        
+        const r = s.origin_hub+'➔'+s.dest_hub;
+        if (!mm[r]) mm[r] = {e:0, s:0, oh: s.origin_hub, dh: s.dest_hub};
+        const nop = getShipmentNOPStats(s);
+        if(nop.isEligible) { mm[r].e++; if(nop.isNopSuccess) mm[r].s++; }
+        
+        if (!lm[s.dest_sc]) lm[s.dest_sc] = {e:0, s:0};
+        if(otd.isEligible) { lm[s.dest_sc].e++; if(otd.isOtdSuccess) lm[s.dest_sc].s++; }
+        
+        if (s.current_phase === 'Exception') {
+            if (!exc[s.dest_hub]) exc[s.dest_hub] = 0;
+            exc[s.dest_hub]++;
+        }
+    });
+
+    const getWorstCount = (obj, minV) => Object.entries(obj).filter(x=>x[1].e >= minV).map(x=>({k:x[0], fails:x[1].e - x[1].s, ...x[1]})).sort((a,b)=>b.fails-a.fails)[0];
+    const topCust = getWorstCount(cust, 5);
+    const topFm = getWorstCount(fm, 5);
+    const topMm = getWorstCount(mm, 5);
+    const topLm = getWorstCount(lm, 5);
+    const topExc = Object.entries(exc).sort((a,b)=>b[1]-a[1])[0];
+
+    const messages = [];
+    if(topCust && topCust.fails > 0) messages.push(`<span class="ticker-item" onclick="setMultiFilter({customer_name: '${topCust.k}'}); window.scrollTo(0,0);"><span class="ticker-badge">Account Alert</span> ${topCust.k}: ${topCust.fails} OTD Failures detected</span>`);
+    if(topFm && topFm.fails > 0) messages.push(`<span class="ticker-item" onclick="setMultiFilter({origin_sc: '${topFm.k}'}); window.scrollTo(0,0);"><span class="ticker-badge">Origin SC Bottleneck</span> ${topFm.k}: ${topFm.fails} Pending Pickups delayed</span>`);
+    if(topMm && topMm.fails > 0) messages.push(`<span class="ticker-item" onclick="setMultiFilter({origin_hub: '${topMm.oh}', dest_hub: '${topMm.dh}'}); window.scrollTo(0,0);"><span class="ticker-badge">Critical Route</span> ${topMm.k}: ${topMm.fails} Network Transit Exceptions</span>`);
+    if(topLm && topLm.fails > 0) messages.push(`<span class="ticker-item" onclick="setMultiFilter({dest_sc: '${topLm.k}'}); window.scrollTo(0,0);"><span class="ticker-badge">Last Mile Risk</span> ${topLm.k}: ${topLm.fails} Delivery Exceptions</span>`);
+    if(topExc) messages.push(`<span class="ticker-item" onclick="setMultiFilter({dest_hub: '${topExc[0]}', current_phase: 'Exception'}); window.scrollTo(0,0);"><span class="ticker-badge">Hub Meltdown</span> ${topExc[0]}: ${topExc[1]} Critical Exceptions reported</span>`);
+
+    const tickerEl = document.getElementById('newsTickerContent');
+    if (!tickerEl) return;
+
+    if (messages.length === 0) {
+        tickerEl.innerHTML = `<span class="ticker-item">✅ Operations Normal. No critical bottlenecks detected at this time.</span>`;
+    } else {
+        const allMsgs = messages.join('');
+        tickerEl.innerHTML = allMsgs + `<span class="ticker-item" style="color:rgba(255,255,255,0.2)">|</span>` + allMsgs;
+    }
 }
 
 window.addEventListener('resize', () => { setTimeout(() => renderView9(getFilteredData()), 200); });
