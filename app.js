@@ -228,7 +228,14 @@ function closeRedsModal() { document.getElementById('reds-modal').style.display 
 function showHelpModal() { document.getElementById('help-modal').style.display = 'flex'; }
 function closeHelpModal() { document.getElementById('help-modal').style.display = 'none'; }
 
-// --- TICKETING SYSTEM ---
+const RESOLUTION_ACTIONS = {
+    'Customer': [{text: 'Proactive Alert', icon: '📩'}, {text: 'SLA Waiver', icon: '📝'}, {text: 'Split Volume', icon: '🔀'}, {text: 'Escalate Dir.', icon: '📈'}],
+    'FirstMile': [{text: 'Ad-Hoc Sweepers', icon: '🚐'}, {text: 'Relocate Volume', icon: '🔄'}, {text: 'Extend Hours', icon: '⏳'}],
+    'MidMile': [{text: 'Ad-Hoc Linehaul', icon: '🚛'}, {text: 'Upgrade Air', icon: '✈️'}, {text: 'Alternate Hub', icon: '🗺️'}],
+    'LastMile': [{text: 'Ad-Hoc Couriers', icon: '🛵'}, {text: 'Weekend Delivery', icon: '📅'}, {text: '3rd Party Partner', icon: '🤝'}],
+    'System': [{text: 'Origin Bypass', icon: '🛑'}, {text: 'Temp Staff', icon: '👷'}, {text: 'Emergency Repack', icon: '📦'}]
+};
+
 let SYSTEM_TICKETS = [];
 let ticketIdCounter = 1000;
 
@@ -289,8 +296,29 @@ function showTicketInbox() {
             const statusColor = t.status === 'OPEN' ? 'var(--dhl-red)' : '#00cc66';
             const filterStr = JSON.stringify(t.filter).replace(/"/g, '&quot;');
             
+            let actionHtml = '';
+            if (t.status === 'OPEN') {
+                const acts = RESOLUTION_ACTIONS[t.type] || [{text: 'Investigate', icon: '🔍'}];
+                const cardsHtml = acts.map((a, i) => `
+                    <div id="card-${t.id}-${i}" onclick="selectResolution('${t.id}', '${a.text}', 'card-${t.id}-${i}')"
+                         style="border: 1px solid #ccc; border-radius: 6px; padding: 6px; cursor: pointer; text-align: center; width: calc(50% - 4px); background:#fff; transition:0.2s;">
+                        <div style="font-size: 16px; margin-bottom: 2px;">${a.icon}</div>
+                        <div style="font-size: 9px; line-height:1.1; font-weight: bold; color:#555;">${a.text}</div>
+                    </div>`).join('');
+                
+                actionHtml = `
+                    <div style="font-size:10px; font-weight:bold; color:#666; margin-bottom:4px; margin-top:4px;">Select Resolution Strategy:</div>
+                    <div style="display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px;" id="grid-${t.id}">
+                        ${cardsHtml}
+                    </div>
+                    <input type="hidden" id="resolve-action-${t.id}" value=""/>
+                    <button class="red-action-btn" style="background:#00cc66; border:none; color:#fff; width:100%; padding: 8px; font-size:13px;" onclick="resolveTicket('${t.id}')">Resolve & Close Ticket</button>`;
+            } else {
+                actionHtml = `<div style="font-size:11px; color:#00cc66; font-weight:bold; text-align:center; padding:8px; border:2px solid #00cc66; border-radius:6px; background:rgba(0,204,102,0.1); margin-top:8px;">✅ Resolved via:<br><span style="color:#333; font-size:13px;">${t.resolution_action}</span></div>`;
+            }
+
             return `<div class="red-item" style="border-left: 4px solid ${statusColor}; margin-bottom: 8px;">
-                        <div class="red-content">
+                        <div class="red-content" style="flex:1;">
                             <div style="display:flex; justify-content:space-between; margin-bottom:4px;">
                                 <div style="font-weight:bold; font-size:12px; color:#aaa;">${t.id} - ${isAutoStr}</div>
                                 <div style="font-weight:bold; font-size:12px; color:${statusColor};">${t.status}</div>
@@ -298,9 +326,9 @@ function showTicketInbox() {
                             <div class="red-title">${t.title}</div>
                             <div class="red-desc" style="color:#aaa;">${t.desc} | Entity: ${t.entity}</div>
                         </div>
-                        <div style="display:flex; flex-direction:column; gap:4px; margin-left:16px;">
-                            <button class="red-action-btn" onclick="applyRedFilter(this, '${filterStr}')" style="width:100%;">Isolate</button>
-                            ${t.status === 'OPEN' ? `<button class="red-action-btn" style="background:#00cc66; border:none; color:#fff; width:100%;" onclick="resolveTicket('${t.id}')">Resolve</button>` : ''}
+                        <div style="display:flex; flex-direction:column; gap:4px; margin-left:16px; min-width: 220px; justify-content:flex-start;">
+                            <button class="red-action-btn" onclick="applyRedFilter(this, '${filterStr}')" style="width:100%; border:1px solid var(--dhl-red); color:var(--dhl-red); background:#fff;">Isolate Root Cause</button>
+                            ${actionHtml}
                         </div>
                     </div>`;
         }).join('');
@@ -308,13 +336,27 @@ function showTicketInbox() {
     document.getElementById('ticket-modal').style.display = 'flex';
 }
 
+function selectResolution(tId, val, cardId) {
+    document.getElementById(`resolve-action-${tId}`).value = val;
+    const grid = document.getElementById(`grid-${tId}`);
+    if(grid) Array.from(grid.children).forEach(c => c.style.border = '1px solid #ccc');
+    const sel = document.getElementById(cardId);
+    if(sel) sel.style.border = '2px solid #00cc66';
+}
+
 function resolveTicket(tId) {
+    const actionSelect = document.getElementById(`resolve-action-${tId}`);
+    if (actionSelect && !actionSelect.value) {
+        showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:var(--dhl-red);">⚠️ Action Required</div>Please select a valid Resolution Action before closing!`);
+        return;
+    }
     const t = SYSTEM_TICKETS.find(x => x.id === tId);
     if(t) { 
         t.status = 'RESOLVED'; 
+        t.resolution_action = actionSelect ? actionSelect.value : 'System Default';
         updateInboxCount(); 
         showTicketInbox(); 
-        showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:#00cc66;">✅ Ticket Closed</div>${t.id} marked as resolved.`);
+        showToast(`<div style="font-size:16px; margin-bottom:8px; font-weight:bold; color:#00cc66;">✅ Ticket Closed</div><b>${t.id}</b> resolved via:<br><i>${t.resolution_action}</i>`);
     }
 }
 function closeTicketModal() { document.getElementById('ticket-modal').style.display = 'none'; }
