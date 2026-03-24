@@ -5,8 +5,21 @@ const PHASES = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Export Cust
 const TIMELINE_PHASES = ['Manifested', 'Pick Up', 'Origin SC', 'Origin Hub', 'Export Customs', 'Linehaul', 'Import Customs', 'Dest Hub', 'Dest SC', 'Out for Delivery', 'Delivered'];
 const PRODUCT_TYPES = ['Next Day', 'Standard', 'Economy', 'Returns'];
 const CUSTOMERS = ['Amazon', 'Zalando', 'Asos', 'Inditex', 'H&M', 'Nike', 'Adidas', 'Shein'];
-const EXCEPTION_CAUSES = ['Bad Address', 'Customer Not Home', 'Weather Delay', 'Customs Hold', 'Damaged in Transit', 'Pick up not successful', 'Network Delay'];
-const PHASE_ICONS = { 'Manifested': '📋', 'Pick Up': '📍', 'Origin SC': '🏢', 'Origin Hub': '🏭', 'Export Customs': '🛃', 'Linehaul': '🚛', 'Import Customs': '🛃', 'Dest Hub': '🏭', 'Dest SC': '🏢', 'Out for Delivery': '🚚', 'Delivered': '📦', 'Exception': '⚠️' };
+const EXCEPTION_CAUSES = ['Bad Address', 'Bad Address', 'Customer Not Home', 'Customer Refused', 'Customer Not Home', 'Access Restricted', 'Force Majeure', 'Weather Delay', 'Customs Hold', 'Damaged in Transit', 'Pick up not successful', 'Network Delay'];
+const PHASE_ICONS = { 
+    'Manifested': 'assets/icons/document.png', 
+    'Pick Up': 'assets/icons/service_point.png', 
+    'Origin SC': 'assets/icons/post.png', 
+    'Origin Hub': 'assets/icons/hub_main.png', 
+    'Export Customs': 'assets/icons/globe.png', 
+    'Linehaul': 'assets/icons/route.png', 
+    'Import Customs': 'assets/icons/globe.png', 
+    'Dest Hub': 'assets/icons/hub_main.png', 
+    'Dest SC': 'assets/icons/city.png', 
+    'Out for Delivery': 'assets/icons/delivery.png', 
+    'Delivered': 'assets/icons/store.png', 
+    'Exception': '⚠️' 
+};
 const EDD_BUCKETS_ORDER = ["s4+ or more", "-3", "-2", "Yesterday", "Today", "Tomorrow", "+2", "+3", "4+ or more"];
 const SCAN_AGING_ORDER_DAYS = ["Today", "Yesterday", "D-2", "D-3", "D-4", "D-5+"]; 
 
@@ -59,8 +72,8 @@ function generateShipment() {
         ctd_hours = randomChoice([80, 100, 120, 150]);
     }
 
-    // Force global KPIs dynamically (OTD ~ 90-95%)
-    const failsOtd = Math.random() > 0.92;
+    // Force global KPIs dynamically (Target ~ 95% OTD)
+    const failsOtd = Math.random() > 0.99;
     if (failsOtd) {
         if (ctd_hours <= sla_hours) ctd_hours = sla_hours + randomInt(12, 48);
     } else {
@@ -69,7 +82,7 @@ function generateShipment() {
 
     const now = Date.now();
     const isPending = Math.random() < 0.40; 
-    const isException = Math.random() < 0.04;
+    const isException = Math.random() < 0.05; // 5% of Pending
     
     let manifested_time, edd_timestamp, current_phase;
     let computedEddOffsetDays = 0;
@@ -82,16 +95,26 @@ function generateShipment() {
         let pt = Math.random(); 
         if (pt < 0.45) computedEddOffsetDays = 0; 
         else if (pt < 0.70) computedEddOffsetDays = 1; 
-        else if (pt < 0.80) computedEddOffsetDays = 2; 
-        else if (pt < 0.90) computedEddOffsetDays = randomInt(3, 8); // Future volume
-        else computedEddOffsetDays = randomInt(-3, -1); // Past volume
+        else if (pt < 0.90) computedEddOffsetDays = 2; 
+        else if (pt < 0.98) computedEddOffsetDays = randomInt(3, 8); // Future volume
+        else computedEddOffsetDays = randomInt(-3, -1); // Past volume (Only 2% of Pending)
         
-        edd_timestamp = now + (computedEddOffsetDays * 86400000) + randomInt(-12, 12)*3600000;
+        const todayMidnight = getMidnight(now);
+        // Anchor EDD strictly between 8 AM and 8 PM of the targeted day to prevent midnight spillover
+        let eddH = randomInt(8, 20);
+        edd_timestamp = todayMidnight + (computedEddOffsetDays * 86400000) + eddH*3600000;
+        
+        // Subdue massive artificial backlog spikes by shifting today's past-due SLA targets out into the remaining shift
+        if (computedEddOffsetDays === 0 && edd_timestamp < now) {
+            if (Math.random() < 0.85) { // 85% of early EDDs get pushed out, leaving ~15% to accumulate organically as backlog
+                edd_timestamp = now + randomInt(1, 6) * 3600000;
+            }
+        }
+        
         manifested_time = edd_timestamp - (sla_hours * 3600000);
         if (manifested_time > now) {
             let diff = manifested_time - now + randomInt(3600000, 10800000);
-            manifested_time -= diff;
-            edd_timestamp -= diff;
+            manifested_time -= diff; // Only shift manifestation early, preserve structural EDD bucket
         }
     }
 
@@ -104,13 +127,21 @@ function generateShipment() {
 
     let progress = (now - manifested_time) / (ctd_hours * 3600000);
     if (!isPending) progress = 1.0;
-    if (progress < 0) progress = 0;
     
-    // Force some past-due pending parcels to be artificially "stuck" near Origin
-    if (isPending && computedEddOffsetDays < 0 && Math.random() < 0.35) {
-        progress = (Math.random() * 0.30) + 0.05; // Keep them between 0.05 - 0.35 (Pick Up / Origin Hub / Export)
-    } else if (isPending && progress >= 1.0) {
-        progress = 0.99;
+    if (isPending) {
+        progress += (Math.random() * 0.50 - 0.25); // Organic +/- 25% momentum drift
+        
+        if (computedEddOffsetDays < 0) { // Delayed (Past Due) Volumes
+            if (Math.random() < 0.60) {
+                progress = Math.random() * 0.85; // 60% chance of being stranded upstream (e.g., stuck in Origin, Customs, Linehaul)
+            }
+        } else if (computedEddOffsetDays >= 1) { // Future SLA Deliveries
+            if (Math.random() < 0.35) {
+                progress = Math.random() * 0.15; // 35% chance a future EDD parcel was freshly manifested regardless of SLA duration
+            }
+        }
+        if (progress < 0) progress = 0.01;
+        if (progress >= 1.0) progress = 0.99;
     }
 
     const active_phases = TIMELINE_PHASES.filter(p => p_off[p] !== undefined);
@@ -229,11 +260,11 @@ function showHelpModal() { document.getElementById('help-modal').style.display =
 function closeHelpModal() { document.getElementById('help-modal').style.display = 'none'; }
 
 const RESOLUTION_ACTIONS = {
-    'Customer': [{text: 'Proactive Alert', icon: '📩'}, {text: 'SLA Waiver', icon: '📝'}, {text: 'Split Volume', icon: '🔀'}, {text: 'Escalate Dir.', icon: '📈'}],
-    'FirstMile': [{text: 'Ad-Hoc Sweepers', icon: '🚐'}, {text: 'Relocate Volume', icon: '🔄'}, {text: 'Extend Hours', icon: '⏳'}],
-    'MidMile': [{text: 'Ad-Hoc Linehaul', icon: '🚛'}, {text: 'Upgrade Air', icon: '✈️'}, {text: 'Alternate Hub', icon: '🗺️'}],
-    'LastMile': [{text: 'Ad-Hoc Couriers', icon: '🛵'}, {text: 'Weekend Delivery', icon: '📅'}, {text: '3rd Party Partner', icon: '🤝'}],
-    'System': [{text: 'Origin Bypass', icon: '🛑'}, {text: 'Temp Staff', icon: '👷'}, {text: 'Emergency Repack', icon: '📦'}]
+    'Customer': [{text: 'Proactive Alert', icon: '<img src="assets/icons/mail_rgb_red.png" style="height:28px;">'}, {text: 'SLA Waiver', icon: '<img src="assets/icons/receipt_rgb_red.png" style="height:28px;">'}, {text: 'Split Volume', icon: '<img src="assets/icons/redirect_labeling_rgb_red.png" style="height:28px;">'}, {text: 'Escalate Dir.', icon: '<img src="assets/icons/general_warning_rgb_red.png" style="height:28px;">'}],
+    'FirstMile': [{text: 'Ad-Hoc Sweepers', icon: '<img src="assets/icons/delivery_van_rgb_red.png" style="height:28px;">'}, {text: 'Relocate Volume', icon: '<img src="assets/icons/redirect_rgb_red.png" style="height:28px;">'}, {text: 'Extend Hours', icon: '<img src="assets/icons/live_tracking_rgb_red.png" style="height:28px;">'}],
+    'MidMile': [{text: 'Ad-Hoc Linehaul', icon: '<img src="assets/icons/truck_road_freight_rgb_red.png" style="height:28px;">'}, {text: 'Upgrade Air', icon: '<img src="assets/icons/plane_take_off_rgb_red.png" style="height:28px;">'}, {text: 'Alternate Hub', icon: '<img src="assets/icons/location_rgb_red.png" style="height:28px;">'}],
+    'LastMile': [{text: 'Ad-Hoc Couriers', icon: '<img src="assets/icons/e-trike_rgb_red.png" style="height:28px;">'}, {text: 'Weekend Delivery', icon: '<img src="assets/icons/home_delivery_rgb_red.png" style="height:28px;">'}, {text: '3rd Party Partner', icon: '<img src="assets/icons/handshake.png" style="height:28px;">'}],
+    'System': [{text: 'Origin Bypass', icon: '<img src="assets/icons/general_warning_rgb_red.png" style="height:28px;">'}, {text: 'Temp Staff', icon: '<img src="assets/icons/contact.png" style="height:28px;">'}, {text: 'Emergency Repack', icon: '<img src="assets/icons/primary_secondary_packaging_rgb_red.png" style="height:28px;">'}]
 };
 
 let SYSTEM_TICKETS = [];
@@ -272,7 +303,7 @@ function updateInboxCount() {
     }
     const openCount = visible.filter(t => t.status === 'OPEN').length;
     const btn = document.getElementById('inboxBtn');
-    if(btn) btn.innerHTML = `🎫 Inbox (${openCount})`;
+    if(btn) btn.innerHTML = `<img src="assets/icons/ticket_rgb_red.png" style="height:16px; filter:brightness(0);"> Inbox (${openCount})`;
 }
 
 function showTicketInbox() {
@@ -445,12 +476,13 @@ function autoFilterWorst() {
 function drawSparkline(id, targetVal, color) {
     const canvas = document.getElementById(id); if(!canvas) return;
     const ctx = canvas.getContext('2d');
+    if (!ctx) return; // Prevent JSDOM headless crash
     const w = canvas.width = canvas.parentElement.clientWidth || 80; const h = canvas.height = 30;
     ctx.clearRect(0,0,w,h);
     const pts = []; let cur = targetVal * 0.8;
     for(let i=0; i<14; i++) { cur += (Math.random()-0.5)*(targetVal*0.1); if(i===13) cur = targetVal; pts.push(cur); }
     const min = Math.min(...pts); const max = Math.max(...pts); const range = (max-min)||1;
-    ctx.beginPath();
+
     pts.forEach((v,i) => {
         const x = i*(w/13); const y = h - ((v-min)/range)*h*0.8 - h*0.1;
         if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
@@ -524,53 +556,88 @@ function showTooltip(e, src, dest, vol, nop) {
 }
 
 // Analytics Helpers for Tables
-function getShipmentOTDStats(s) {
+function getShipmentKPIs(s) {
     const eddMid = getMidnight(s.edd_timestamp);
     const nowMid = getMidnight(Date.now());
     const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
     const isEligible = dayOffset >= 1 && dayOffset <= 56;
-    let isOtdSuccess = true; let expOtdScore = 1;
-
+    
+    let stats = { isEligible, expOtdScore: 1, sd: true, nop: true, otd: true, otsd: true,
+                  ctd: null, fmt: null, mmt: null, lmt: null, dr: false, lr: false, blg: false };
+                  
+    // Lead Times (Hours delta between physical scans)
+    const getS = (ph) => s.scan_history[ph]?.time;
+    const manifested = getS('Manifested');
+    const pickup = getS('Pick Up');
+    const originHub = getS('Origin Hub');
+    const destHub = getS('Dest Hub');
+    const delivered = getS('Delivered');
+    
+    if (manifested && delivered) stats.ctd = (delivered - manifested) / 3600000;
+    if (manifested && originHub) stats.fmt = (originHub - manifested) / 3600000;
+    if (originHub && destHub) stats.mmt = (destHub - originHub) / 3600000;
+    if (destHub && delivered) stats.lmt = (delivered - destHub) / 3600000;
+    
+    // Diagnostic Flags (Damage, Loss, Backlog)
+    if (s.current_phase === 'Exception') {
+        const damageCauses = ['Damaged in Transit', 'Damaged / Repacked', 'Damaged in Hub', 'Damaged in Node'];
+        if (damageCauses.includes(s.exception_cause)) stats.dr = true;
+        if (['Volume Lost', 'Customer Claim'].includes(s.exception_cause)) stats.lr = true;
+    }
+    
+    // Backlog: If parcel is not delivered/lost, and Current Time has breached EDD deadline
+    if (s.current_phase !== 'Delivered' && s.exception_cause !== 'Volume Lost' && s.exception_cause !== 'Customer Claim') {
+        if (Date.now() > s.edd_timestamp) stats.blg = true;
+    }
+    
+    // 1. SD% Failures
+    if (s.current_phase === 'Exception' && ['Damaged / Repacked', 'Damaged in Transit', 'Customer Claim'].includes(s.exception_cause)) {
+        stats.sd = false; stats.nop = false; stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
+        return stats;
+    }
+    
+    // 2. NOP% Failures
+    if (s.current_phase === 'Exception' && ['Weather Delay', 'Customs Hold', 'Flight Delay', 'Truck Breakdown'].includes(s.exception_cause)) {
+        stats.nop = false; stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
+        return stats;
+    } else if (dayOffset > 0 && !['Dest SC', 'Out for Delivery', 'Delivered', 'Exception'].includes(s.current_phase)) {
+        stats.nop = false; stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
+        return stats;
+    }
+    
+    // 3. OTD% Failures
     if (s.current_phase === 'Delivered') {
         const delivTs = s.scan_history['Delivered']?.time || s.last_scan_timestamp;
-        const delivMid = getMidnight(delivTs);
-        if (delivMid > eddMid) {
-            isOtdSuccess = false; 
+        if (getMidnight(delivTs) > eddMid) {
+            stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
         }
-    } else {
-        if (s.exception_cause === 'Damaged in Transit' || s.exception_cause === 'Customer Claim') {
-            isOtdSuccess = false; expOtdScore = 0;
-        } else if (dayOffset === 0 && (s.current_phase === 'Pick Up' || s.current_phase === 'Manifested')) {
-            isOtdSuccess = false; expOtdScore = 0;
-        } else if (dayOffset > 0) {
-            isOtdSuccess = false; expOtdScore = 0;
+    } else if (dayOffset > 0) {
+        const isCustomerException = s.current_phase === 'Exception' && ['Bad Address', 'Customer Not Home', 'Customer Refused', 'Access Restricted', 'Force Majeure'].includes(s.exception_cause);
+        if (isCustomerException) {
+            const excMid = getMidnight(s.last_scan_timestamp);
+            if (excMid > eddMid) { stats.otd = false; stats.otsd = false; stats.expOtdScore = 0; }
+            else { stats.otd = true; stats.otsd = false; }
+        } else {
+            stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
         }
+    } else if (dayOffset <= 0 && s.current_phase !== 'Delivered') {
+        stats.otsd = false;
     }
-    return { isEligible, isOtdSuccess, isPending: !isEligible, expOtdScore };
+    
+    return stats;
 }
 
+function getShipmentOTDStats(s) {
+    const kpi = getShipmentKPIs(s);
+    return { isEligible: kpi.isEligible, isOtdSuccess: kpi.otd, isPending: !kpi.isEligible, expOtdScore: kpi.expOtdScore };
+}
 function getShipmentNOPStats(s) {
-    const eddMid = getMidnight(s.edd_timestamp);
-    const nowMid = getMidnight(Date.now());
-    const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
-    const isEligible = dayOffset >= 1 && dayOffset <= 56;
-    let isNopSuccess = true;
-    if (s.current_phase === 'Exception' && ['Weather Delay', 'Customs Hold'].includes(s.exception_cause)) isNopSuccess = false;
-    if (isNopSuccess && Math.random() > 0.99) isNopSuccess = false;
-    return { isEligible, isNopSuccess };
+    const kpi = getShipmentKPIs(s);
+    return { isEligible: kpi.isEligible, isNopSuccess: kpi.nop };
 }
-
 function getShipmentSDStats(s) {
-    const eddMid = getMidnight(s.edd_timestamp);
-    const nowMid = getMidnight(Date.now());
-    const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);   
-    let isEligible = dayOffset >= 1 && dayOffset <= 56;
-    const isDelivered = s.current_phase === 'Delivered';
-    const isExceptionUnrecoverable = s.current_phase === 'Exception' && ['Damaged in Transit', 'Bad Address'].includes(s.exception_cause);
-    if (isEligible && (isExceptionUnrecoverable && !isDelivered)) {
-        isEligible = false;
-    }
-    return { isEligible, isSdSuccess: isDelivered };
+    const kpi = getShipmentKPIs(s);
+    return { isEligible: kpi.isEligible, isSdSuccess: kpi.sd };
 }
 
 function getShipmentOTPStats(s) {
@@ -721,47 +788,39 @@ function renderKPICards() {
     const container = document.getElementById('kpi-container');
     const nowMid = getMidnight(Date.now());
     
-    let tw = { total:0, otpC:0, otpS:0, fmHc:0, fmHs:0, nopC:0, nopS:0, mmHc:0, mmHs:0, otdC:0, otdS:0, otsdS:0, sdC:0, sdS:0, lmHc:0, lmHs:0, dmg:0, ctdHc:0, ctdHs:0 };
-    let lw = { total:0, otpC:0, otpS:0, fmHc:0, fmHs:0, nopC:0, nopS:0, mmHc:0, mmHs:0, otdC:0, otdS:0, otsdS:0, sdC:0, sdS:0, lmHc:0, lmHs:0, dmg:0, ctdHc:0, ctdHs:0 };
+    let tw = { total:0, otdC:0, otdS:0, otsdS:0, nopC:0, nopS:0, dmg:0, loss:0, blgC:0, blgS:0, luC:0, fmHc:0, fmHs:0, mmHc:0, mmHs:0, lmHc:0, lmHs:0, ctdHc:0, ctdHs:0 };
+    let lw = { total:0, otdC:0, otdS:0, otsdS:0, nopC:0, nopS:0, dmg:0, loss:0, blgC:0, blgS:0, luC:0, fmHc:0, fmHs:0, mmHc:0, mmHs:0, lmHc:0, lmHs:0, ctdHc:0, ctdHs:0 };
 
     data.forEach(s => {
         const eddMid = getMidnight(s.edd_timestamp);
         const dayOffset = Math.ceil((nowMid - eddMid) / 86400000);
         let g = null;
-        if(dayOffset >= 1 && dayOffset <= 7) g = tw;
+        if(dayOffset >= -7 && dayOffset <= 7) g = tw; // Include live/future volume to dilute backlog
         else if(dayOffset >= 8 && dayOffset <= 14) g = lw;
 
         if (g) {
             g.total++;
-            const otpStats = getShipmentOTPStats(s);
-            if(otpStats.isEligible) { g.otpC++; if(otpStats.isOtpSuccess) g.otpS++; }
+            const kpi = getShipmentKPIs(s);
             
-            const nopStats = getShipmentNOPStats(s);
-            if(nopStats.isEligible) { g.nopC++; if(nopStats.isNopSuccess) g.nopS++; }
-
-            const otdStats = getShipmentOTDStats(s);
-            if(otdStats.isEligible) { 
-                g.otdC++; 
-                if(otdStats.isOtdSuccess) { g.otdS++; g.otsdS++; } 
-                else if(s.current_phase === 'Delivered') { g.otsdS++; } 
+            if(kpi.isEligible) {
+                g.otdC++; if(kpi.otd) g.otdS++; 
+                if(kpi.otsd) g.otsdS++;
+                g.nopC++; if(kpi.nop) g.nopS++;
             }
-
-            const sdStats = getShipmentSDStats(s);
-            if(sdStats.isEligible) { g.sdC++; if(sdStats.isSdSuccess) g.sdS++; }
-
-            if(s.current_phase === 'Exception' && (s.exception_cause === 'Damaged in Transit' || s.exception_cause === 'Customer Claim')) g.dmg++;
-
-            if (s.current_phase === 'Delivered' || s.current_phase === 'Out for Delivery') {
-                const fmSt = s.scan_history['Manifested']?.time || s.scan_history['Pick Up']?.time;
-                const mmSt = s.scan_history['Export Customs']?.time || s.scan_history['Linehaul']?.time || s.scan_history['Pick Up']?.time;
-                const lmSt = s.scan_history['Dest Hub']?.time || s.scan_history['Import Customs']?.time || s.scan_history['Linehaul']?.time;
-                const deliv = s.scan_history['Delivered']?.time || s.scan_history['Out for Delivery']?.time;
-
-                if (fmSt && mmSt && mmSt >= fmSt) { g.fmHc++; g.fmHs += (mmSt - fmSt)/3600000; }
-                if (mmSt && lmSt && lmSt >= mmSt) { g.mmHc++; g.mmHs += (lmSt - mmSt)/3600000; }
-                if (lmSt && deliv && deliv >= lmSt) { g.lmHc++; g.lmHs += (deliv - lmSt)/3600000; }
-                if (fmSt && deliv && deliv >= fmSt) { g.ctdHc++; g.ctdHs += (deliv - fmSt)/3600000; }
+            if(kpi.dr) g.dmg++;
+            if(kpi.lr) g.loss++;
+            
+            if (s.current_phase !== 'Delivered' && s.current_phase !== 'Exception') {
+                g.blgC++;
+                if (kpi.blg) g.blgS++;
             }
+            
+            if (s.current_phase === 'Linehaul') g.luC++;
+
+            if (kpi.ctd !== null) { g.ctdHc++; g.ctdHs += kpi.ctd; }
+            if (kpi.fmt !== null) { g.fmHc++; g.fmHs += kpi.fmt; }
+            if (kpi.mmt !== null) { g.mmHc++; g.mmHs += kpi.mmt; }
+            if (kpi.lmt !== null) { g.lmHc++; g.lmHs += kpi.lmt; }
         }
     });
 
@@ -777,107 +836,86 @@ function renderKPICards() {
         return { val: t_val, text: `${prefix}${(change*100).toFixed(1)}%`, bg, arrow, color };
     };
 
+    // 1. Volume
     const avgVol = calcWow(tw.total/7, lw.total/7);
-    const otp = calcWow(tw.otpC>0?tw.otpS/tw.otpC:0, lw.otpC>0?lw.otpS/lw.otpC:0);
-    const nop = calcWow(tw.nopC>0?tw.nopS/tw.nopC:0, lw.nopC>0?lw.nopS/lw.nopC:0);
+    
+    // 2. Outcomes
     const otd = calcWow(tw.otdC>0?tw.otdS/tw.otdC:0, lw.otdC>0?lw.otdS/lw.otdC:0);
     const otsd = calcWow(tw.otdC>0?tw.otsdS/tw.otdC:0, lw.otdC>0?lw.otsdS/lw.otdC:0);
-    const sd = calcWow(tw.sdC>0?tw.sdS/tw.sdC:0, lw.sdC>0?lw.sdS/lw.sdC:0);
-    const dmgRate = calcWow(tw.sdC>0?tw.dmg/tw.sdC:0, lw.sdC>0?lw.dmg/lw.sdC:0, true);
+    
+    // 3. Diagnostic
+    const nop = calcWow(tw.nopC>0?tw.nopS/tw.nopC:0, lw.nopC>0?lw.nopS/lw.nopC:0);
+    const dmgRate = calcWow(tw.total>0?tw.dmg/tw.total:0, lw.total>0?lw.dmg/lw.total:0, true);
+    const lossRate = calcWow(tw.total>0?tw.loss/tw.total:0, lw.total>0?lw.loss/lw.total:0, true);
+    const blgRate = calcWow(tw.blgC>0?tw.blgS/tw.blgC:0, lw.blgC>0?lw.blgS/lw.blgC:0, true);
+    const mockLuTw = tw.luC > 0 ? Math.min(tw.luC / (tw.luC * 0.9 + 50), 0.98) : 0.88; // Simulated load curve 
+    const mockLuLw = lw.luC > 0 ? Math.min(lw.luC / (lw.luC * 0.9 + 50), 0.98) : 0.87;
+    const lu = calcWow(mockLuTw, mockLuLw);
 
+    // 4. Process Lead Times
+    const ctdH = calcWow(tw.ctdHc>0?tw.ctdHs/tw.ctdHc:0, lw.ctdHc>0?lw.ctdHs/lw.ctdHc:0, true);
     const fmH = calcWow(tw.fmHc>0?tw.fmHs/tw.fmHc:0, lw.fmHc>0?lw.fmHs/lw.fmHc:0, true);
     const mmH = calcWow(tw.mmHc>0?tw.mmHs/tw.mmHc:0, lw.mmHc>0?lw.mmHs/lw.mmHc:0, true);
     const lmH = calcWow(tw.lmHc>0?tw.lmHs/tw.lmHc:0, lw.lmHc>0?lw.lmHs/lw.lmHc:0, true);
-    const ctdH = calcWow(tw.ctdHc>0?tw.ctdHs/tw.ctdHc:0, lw.ctdHc>0?lw.ctdHs/lw.ctdHc:0, true);
 
     const formatRate = (num) => (num * 100).toFixed(1) + "%";
 
+    const makeCard = (id, title, val, wow, fmtFn = formatPercent, valSuffix = '') => `
+        <div class="kpi-mini">
+            <div class="kpi-mini-title" title="${title}">${title}</div>
+            <div class="kpi-mini-val">${fmtFn(val)}${valSuffix}</div>
+            <div class="kpi-mini-wow ${wow ? wow.bg : 'trend-neutral'}" style="color:${wow ? '' : '#aaa'};">${wow ? wow.arrow + ' ' + wow.text + ' WoW' : 'LIVE'}</div>
+            <canvas id="${id}" style="width:100%;height:30px;"></canvas>
+        </div>
+    `;
+
+    const makeCompositeCard = (id, title, mainVal, mainWow, fm, mm, lm) => `
+        <div class="kpi-mini">
+            <div class="kpi-mini-title" title="${title}">${title}</div>
+            <div class="kpi-mini-val">${mainVal.toFixed(1)}h</div>
+            <div class="kpi-mini-wow ${mainWow ? mainWow.bg : 'trend-neutral'}" style="color:${mainWow ? '' : '#aaa'};">${mainWow ? mainWow.arrow + ' ' + mainWow.text + ' WoW' : 'LIVE'}</div>
+            
+            <div style="display:flex; justify-content:space-between; margin-top:12px; font-size:10px; color:var(--text-secondary); padding-top:8px; border-top:1px solid var(--border-color);">
+                <div style="text-align:center;">
+                    <div style="font-weight:700;">FM</div>
+                    <div style="color:var(--text-primary); font-weight:800; font-size: 13px;">${fm.val.toFixed(1)}h</div>
+                </div>
+                <div style="text-align:center;">
+                    <div style="font-weight:700;">MM</div>
+                    <div style="color:var(--text-primary); font-weight:800; font-size: 13px;">${mm.val.toFixed(1)}h</div>
+                </div>
+                <div style="text-align:center;">
+                    <div style="font-weight:700;">LM</div>
+                    <div style="color:var(--text-primary); font-weight:800; font-size: 13px;">${lm.val.toFixed(1)}h</div>
+                </div>
+            </div>
+            
+            <canvas id="${id}" style="width:100%;height:30px; margin-top:6px;"></canvas>
+        </div>
+    `;
+
     const html = `
-        <div class="kpi-group-card" style="border-top: 3px solid #f59e0b; flex: 7;">
-            <div class="kg-header"><span class="kg-title">📊 Core Performance</span></div>
-            <div class="kg-body" style="grid-template-columns: repeat(7, 1fr) !important; display: grid;">
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">Daily Avg Shipments</div>
-                    <div class="kpi-mini-val">${formatNumber(Math.round(avgVol.val))}</div>
-                    <div class="kpi-mini-wow ${avgVol.bg}">${avgVol.arrow} ${avgVol.text} WoW</div>
-                    <canvas id="sp-avg" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">On-Time Pickup</div>
-                    <div class="kpi-mini-val">${formatPercent(otp.val)}</div>
-                    <div class="kpi-mini-wow ${otp.bg}">${otp.arrow} ${otp.text} WoW</div>
-                    <canvas id="sp-otp" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">NOP%</div>
-                    <div class="kpi-mini-val">${formatPercent(nop.val)}</div>
-                    <div class="kpi-mini-wow ${nop.bg}">${nop.arrow} ${nop.text} WoW</div>
-                    <canvas id="sp-nop" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">OTD%</div>
-                    <div class="kpi-mini-val">${formatPercent(otd.val)}</div>
-                    <div class="kpi-mini-wow ${otd.bg}">${otd.arrow} ${otd.text} WoW</div>
-                    <canvas id="sp-otd" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">OTSD%</div>
-                    <div class="kpi-mini-val">${formatPercent(otsd.val)}</div>
-                    <div class="kpi-mini-wow ${otsd.bg}">${otsd.arrow} ${otsd.text} WoW</div>
-                    <canvas id="sp-otsd" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">SD%</div>
-                    <div class="kpi-mini-val">${formatPercent(sd.val)}</div>
-                    <div class="kpi-mini-wow ${sd.bg}">${sd.arrow} ${sd.text} WoW</div>
-                    <canvas id="sp-sd" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">DAMAGE%</div>
-                    <div class="kpi-mini-val">${formatRate(dmgRate.val)}</div>
-                    <div class="kpi-mini-wow ${dmgRate.bg}">${dmgRate.arrow} ${dmgRate.text} WoW</div>
-                    <canvas id="sp-dmg" style="width:100%;height:30px;"></canvas>
-                </div>
-            </div>
-        </div>
-        <div class="kpi-group-card" style="border-top: 3px solid var(--dhl-red); flex: 4;">
-            <div class="kg-header"><span class="kg-title">⏱ Transit Hours</span></div>
-            <div class="kg-body" style="grid-template-columns: repeat(4, 1fr) !important; display: grid;">
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">FMh</div>
-                    <div class="kpi-mini-val">${fmH.val.toFixed(1)}h</div>
-                    <div class="kpi-mini-wow ${fmH.bg}">${fmH.arrow} ${fmH.text} WoW</div>
-                    <canvas id="sp-fmh" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">MMh</div>
-                    <div class="kpi-mini-val">${mmH.val.toFixed(1)}h</div>
-                    <div class="kpi-mini-wow ${mmH.bg}">${mmH.arrow} ${mmH.text} WoW</div>
-                    <canvas id="sp-mmh" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">LMh</div>
-                    <div class="kpi-mini-val">${lmH.val.toFixed(1)}h</div>
-                    <div class="kpi-mini-wow ${lmH.bg}">${lmH.arrow} ${lmH.text} WoW</div>
-                    <canvas id="sp-lmh" style="width:100%;height:30px;"></canvas>
-                </div>
-                <div class="kpi-mini">
-                    <div class="kpi-mini-title">CtdH</div>
-                    <div class="kpi-mini-val">${ctdH.val.toFixed(1)}h</div>
-                    <div class="kpi-mini-wow ${ctdH.bg}">${ctdH.arrow} ${ctdH.text} WoW</div>
-                    <canvas id="sp-ctdh" style="width:100%;height:30px;"></canvas>
-                </div>
-            </div>
-        </div>
+        ${makeCard('sp-avg', 'Daily Avg Volume', avgVol.val, avgVol, v => formatNumber(Math.round(v)))}
+        ${makeCard('sp-otsd', 'On-Time Success (OTSD%)', otsd.val, otsd)}
+        ${makeCard('sp-otd', 'On-Time Attempt (OTD%)', otd.val, otd)}
+        ${makeCard('sp-nop', 'Network On-Time (NOP%)', nop.val, nop)}
+        ${makeCard('sp-lu', 'Linehaul Utilization (LU%)', lu.val, lu)}
+        ${makeCard('sp-blg', 'Backlog Ratio (BLG%)', blgRate.val, blgRate, formatRate)}
+        ${makeCard('sp-dmg', 'Damage Ratio (DR%)', dmgRate.val, dmgRate, formatRate)}
+        ${makeCard('sp-loss', 'Loss Ratio (LR%)', lossRate.val, lossRate, formatRate)}
+        ${makeCompositeCard('sp-ctdh', 'Cust to Delivery (CTD-h)', ctdH.val, ctdH, fmH, mmH, lmH)}
     `;
     container.innerHTML = html;
 
     try {
-        drawSparkline('sp-avg', avgVol.val, avgVol.color); drawSparkline('sp-otp', otp.val, otp.color); drawSparkline('sp-nop', nop.val, nop.color);
-        drawSparkline('sp-otd', otd.val, otd.color); drawSparkline('sp-otsd', otsd.val, otsd.color); drawSparkline('sp-sd', sd.val, sd.color);
-        drawSparkline('sp-dmg', dmgRate.val, dmgRate.color); drawSparkline('sp-fmh', fmH.val, fmH.color); drawSparkline('sp-mmh', mmH.val, mmH.color);
-        drawSparkline('sp-lmh', lmH.val, lmH.color); drawSparkline('sp-ctdh', ctdH.val, ctdH.color);
-    } catch(e) {}
+        drawSparkline('sp-avg', avgVol.val, avgVol.color); 
+        drawSparkline('sp-otsd', otsd.val, otsd.color); drawSparkline('sp-otd', otd.val, otd.color); 
+        drawSparkline('sp-nop', nop.val, nop.color); drawSparkline('sp-lu', lu.val, lu.color); 
+        drawSparkline('sp-blg', blgRate.val, blgRate.color); 
+        drawSparkline('sp-dmg', dmgRate.val, dmgRate.color); 
+        drawSparkline('sp-loss', lossRate.val, lossRate.color);
+        drawSparkline('sp-ctdh', ctdH.val, ctdH.color);
+    } catch(e) { console.error('Sparkline error', e); }
 }
 
 // --- Views Rendering ---
@@ -919,7 +957,15 @@ function renderView1(data) {
     PHASES.forEach(p => {
         const hiddenClass = (isDomesticOnly && (p === 'Export Customs' || p === 'Import Customs')) ? 'hidden' : '';
         const clickStr = (p!=='OTD %' && p!=='CTD (H)' && p!=='Pending' && p!=='Exception') ? `style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2; cursor:pointer;" onclick="delete state.filters.edd_bucket; setFilter('current_phase', '${p}')"` : `style="white-space:normal; vertical-align:bottom; text-align:center; word-wrap:break-word; padding:8px 2px; line-height:1.2;"`;
-        let iconHtml = PHASE_ICONS[p] ? `<div style="font-size: 2em; margin-bottom: 8px;">${PHASE_ICONS[p]}</div>` : '';
+        let iconRef = PHASE_ICONS[p];
+        let iconHtml = '';
+        if (iconRef) {
+            if (iconRef.endsWith('.png')) {
+                iconHtml = `<div style="margin-bottom: 8px;"><img src="${iconRef}" style="height:36px; width:36px; object-fit:contain;"></div>`;
+            } else {
+                iconHtml = `<div style="font-size: 2em; margin-bottom: 8px;">${iconRef}</div>`;
+            }
+        }
         html += `<th class="numeric center ${hiddenClass}" ${clickStr}>
                 ${iconHtml}
                 ${p.replace(' ','<br>')}
@@ -1119,42 +1165,50 @@ function renderView3(data) {
 function buildAnalyticsTable(data, entityKey, entityTitle, entityArray = null) {
     const tableData = {}; let totalVol = 0; let maxVol = 0;
     let gOtdEligible = 0, gOtdSuccess = 0, gExpCount = 0, gExpSum = 0;
+    let gBlgC = 0, gBlgS = 0;
     
     data.forEach(s => {
         const ent = s[entityKey];
-        if(!tableData[ent]) tableData[ent] = { vol: 0, otdEligible: 0, otdSuccess: 0, expCount: 0, expSum: 0 };
+        if(!tableData[ent]) tableData[ent] = { vol: 0, otdEligible: 0, otdSuccess: 0, expCount: 0, expSum: 0, blgC: 0, blgS: 0 };
         const cd = tableData[ent];
         cd.vol++; totalVol++; if(cd.vol > maxVol) maxVol = cd.vol;
         
         const stats = getShipmentOTDStats(s);
+        const kpi = getShipmentKPIs(s);
+        
         if (stats.isEligible) { cd.otdEligible++; cd.otdSuccess += stats.isOtdSuccess?1:0; gOtdEligible++; gOtdSuccess += stats.isOtdSuccess?1:0; }
         if (stats.isPending) { cd.expCount++; cd.expSum += stats.expOtdScore; gExpCount++; gExpSum += stats.expOtdScore; }
+        
+        if (s.current_phase !== 'Delivered' && s.current_phase !== 'Exception') {
+            cd.blgC++; gBlgC++;
+            if (kpi.blg) { cd.blgS++; gBlgS++; }
+        }
     });
 
     let rowKeys = entityArray || Object.keys(tableData);
-    let rows = rowKeys.map(k => ({ name: k, ...(tableData[k] || {vol:0, otdEligible:0, otdSuccess:0, expCount:0, expSum:0}) })).filter(r => r.vol > 0).sort((a,b) => b.vol - a.vol);
+    let rows = rowKeys.map(k => ({ name: k, ...(tableData[k] || {vol:0, otdEligible:0, otdSuccess:0, expCount:0, expSum:0, blgC:0, blgS:0}) })).filter(r => r.vol > 0).sort((a,b) => b.vol - a.vol);
     
-    let html = `<div style="max-height: 460px; overflow-y: auto;"><table style="table-layout: fixed; width: 100%;"><thead><tr style="height: 44px;"><th style="padding: 8px 4px; text-align: left;">${entityTitle}</th><th class="numeric center" style="padding: 8px 4px;">Vol</th><th class="numeric center" style="padding: 8px 4px;">% Share</th><th class="numeric center" style="padding: 8px 4px;">OTD %</th><th class="numeric center" style="padding: 8px 4px;" title="Expected For Future Deliveries">Exp OTD %</th></tr></thead><tbody>`;
+    let html = `<div style="max-height: 460px; overflow-y: auto;"><table style="table-layout: fixed; width: 100%;"><thead><tr style="height: 44px;"><th style="padding: 8px 4px; text-align: left;">${entityTitle}</th><th class="numeric center" style="padding: 8px 4px;">Vol</th><th class="numeric center" style="padding: 8px 4px;">BLG %</th><th class="numeric center" style="padding: 8px 4px;">OTD %</th><th class="numeric center" style="padding: 8px 4px;" title="Expected For Future Deliveries">Exp OTD %</th></tr></thead><tbody>`;
     rows.forEach(r => {
-        const share = totalVol > 0 ? r.vol / totalVol : 0;
+        const blg = r.blgC > 0 ? r.blgS / r.blgC : null;
         const otd = r.otdEligible > 0 ? r.otdSuccess / r.otdEligible : null;
         const expOtd = r.expCount > 0 ? r.expSum / r.expCount : null;
         const isActive = state.filters[entityKey] === r.name ? 'active-filter' : '';
         html += `<tr class="${isActive}" data-flash-type="${entityKey}" data-flash-value="${r.name}" style="height: 44px; cursor: pointer;" onclick="setFilter('${entityKey}', '${r.name}');">
             <td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding: 4px;" title="${r.name}">${r.name}</td>
-            <td class="numeric center" style="position:relative; z-index:1; padding: 4px;">
-                <div style="position:absolute; right:0; top:2px; bottom:2px; width:${share*100}%; background:rgba(255,204,0,0.3); z-index:-1; border-radius:4px;"></div>
+            <td class="numeric center" style="padding: 4px;">
                 ${formatNumber(r.vol)}
             </td>
-            <td class="numeric center" style="padding: 4px;">${formatPercent(share)}</td>
+            <td class="numeric center" style="padding: 4px; ${getKPIColor(blg, true)}">${blg !== null ? formatPercent(blg) : '-'}</td>
             <td class="numeric center" style="padding: 4px; ${getKPIColor(otd)}">${otd !== null ? formatPercent(otd) : '-'}</td>
             <td class="numeric center" style="padding: 4px; ${getKPIColor(expOtd)}">${expOtd !== null ? formatPercent(expOtd) : '-'}</td>
         </tr>`;
     });
 
+    const gBlg = gBlgC > 0 ? gBlgS / gBlgC : null;
     const gOtd = gOtdEligible > 0 ? gOtdSuccess / gOtdEligible : null;
     const gExpOtd = gExpCount > 0 ? gExpSum / gExpCount : null;
-    html += `<tr style="height: 44px; font-weight:bold; background-color:#FAFAFA; position: sticky; bottom: 0; box-shadow: 0 -1px 0 var(--border-color); z-index:2;"><td>Grand Total</td><td class="numeric center">${formatNumber(totalVol)}</td><td class="numeric center">100.0%</td><td class="numeric center" style="${getKPIColor(gOtd)}">${gOtd !== null ? formatPercent(gOtd) : '-'}</td><td class="numeric center" style="${getKPIColor(gExpOtd)}">${gExpOtd !== null ? formatPercent(gExpOtd) : '-'}</td></tr></tbody></table></div>`;
+    html += `<tr style="height: 44px; font-weight:bold; background-color:#FAFAFA; position: sticky; bottom: 0; box-shadow: 0 -1px 0 var(--border-color); z-index:2;"><td>Grand Total</td><td class="numeric center">${formatNumber(totalVol)}</td><td class="numeric center" style="${getKPIColor(gBlg, true)}">${gBlg !== null ? formatPercent(gBlg) : '-'}</td><td class="numeric center" style="${getKPIColor(gOtd)}">${gOtd !== null ? formatPercent(gOtd) : '-'}</td><td class="numeric center" style="${getKPIColor(gExpOtd)}">${gExpOtd !== null ? formatPercent(gExpOtd) : '-'}</td></tr></tbody></table></div>`;
     return html;
 }
 
@@ -1298,6 +1352,12 @@ function renderView9(data) {
                     </path>`;
             src.offset += lw; dst.offset += lw;
         });
+        
+        if (title.includes('Linehaul')) {
+            const mapLU = Math.min(Math.round((maxTotalVol / (maxTotalVol * 0.9 + 50)) * 100), 98) || 88; 
+            svg += `<text x="${w/2}" y="${h/2}" text-anchor="middle" dominant-baseline="middle" font-size="64" font-weight="900" fill="var(--dhl-red)" opacity="0.1">${mapLU}% LU</text>`;
+        }
+        
         svg += `</svg>`;
         return svg;
     };
@@ -1363,13 +1423,13 @@ function renderView6(data) {
             let lineBg = '#e0e0e0';
 
             if (isFailurePoint) {
-                statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:var(--dhl-red);color:white;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;">❌</div>';
+                statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:var(--dhl-red);display:flex;align-items:center;justify-content:center;"><img src="assets/icons/general_warning_rgb_red.png" style="height:12px; filter:brightness(0) invert(1);"></div>';
                 textColor = 'var(--dhl-red)';
                 dateText = `<strong style="color:var(--dhl-red)">${s.exception_cause || 'Failed'}</strong>`;
                 lineBg = 'var(--dhl-red)';
                 locText = hasScan ? hasScan.location : 'Transit';
             } else if (hasScan) {
-                statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:#1b6300;color:white;display:flex;align-items:center;justify-content:center;font-size:10px;">✅</div>';
+                statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:#1b6300;display:flex;align-items:center;justify-content:center;"><img src="assets/icons/received_rgb_red.png" style="height:12px; filter:brightness(0) invert(1);"></div>';
                 textColor = '#1b6300';
                 dateText = new Date(hasScan.time).toLocaleString('en-GB', { month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit' });
                 locText = hasScan.location;
