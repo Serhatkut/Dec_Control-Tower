@@ -22,6 +22,7 @@
     </script>
     <meta name="description" content="Operational Dashboard tracking parcel network real-time events, SLA/OTP, and stangation.">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -135,9 +136,10 @@
                      </h1>
                 </div>
                 <nav class="main-nav" style="margin-left: 20px; display: flex; border-left: 1px solid var(--border-color); padding-left: 20px; gap: 10px; align-items: center;">
-                    <a href="index.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; transition: background 0.2s;">Operations & E2E</a>
-                    <a href="efficiency-hub.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--dhl-red); color: white; font-weight: 700; font-size: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Hub & Network Efficiency</a>
-                    <a href="efficiency-route.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; transition: background 0.2s;">Route & Driver Efficiency</a>
+                    <a href="index.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--dhl-red); color: white; font-weight: 700; font-size: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Reliable OPS & Executive</a>
+                    <a href="#" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; opacity: 0.4; cursor: not-allowed; pointer-events: none;" title="Temporarily Disabled">Hub Productivity</a>
+                    <a href="#" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; opacity: 0.4; cursor: not-allowed; pointer-events: none;" title="Temporarily Disabled">Line Haul Utilization</a>
+                    <a href="#" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; opacity: 0.4; cursor: not-allowed; pointer-events: none;" title="Temporarily Disabled">Route & Driver Efficiency</a>
                 </nav>
                 <!-- Breadcrumbs for active filters -->
                 <div class="breadcrumbs" id="breadcrumbs" style="margin-left: 20px;"></div>
@@ -178,102 +180,45 @@
         </div>
         </div> <!-- END STICKY NAVBAR WRAPPER -->
 
-        <!-- DASHBOARD GRID -->
-        <main class="dashboard-grid">
+        <main class="dashboard-grid" style="padding: 20px; display:flex; flex-direction:column; gap:20px;">
             
-            <!-- SECT 1 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Executive KPI Performance</h3>
-            <span class="section-desc">High-level metrics tracking core operations and transit service levels.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- KPI CARDS -->
-            <div class="kpi-grid span-full" id="kpi-container" style="display: flex; gap: 12px; margin-bottom: 8px;"></div>
-
+            <!-- TOP ROW -->
+            <div style="display:grid; grid-template-columns: 350px 1fr; gap:20px; min-height:280px;">
+                <div id="kpi-container-hub" style="display:flex; flex-direction:column; justify-content:flex-start;"></div>
+                <div class="panel card" style="flex:1; display:flex; flex-direction:column;">
+                    <div class="card-header" style="border-bottom:none;">
+                        <h2>Performance - Previous Weeks compared to Last Year</h2>
+                        <div style="font-size:11px; font-weight:bold; color:#d40511;">● PPH &nbsp;&nbsp; <span style="color:#facc15;">● PPH LY</span></div>
+                    </div>
+                    <div style="flex:1; padding: 5px 20px 20px 20px; position:relative;">
+                        <canvas id="hubTrendChart"></canvas>
+                    </div>
                 </div>
-</details>
-
-<!-- SECT 2: EFFICIENCY CHARTS -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Productivity Trends & Forecasting</h3>
-            <span class="section-desc">8-Week historical charting and real-time intraday labor pacing extrapolations.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <div style="display: flex; gap: 20px; width: 100%;">
-            <!-- 8-Week Trend Chart -->
-            <section class="card" style="flex: 1;">
-                <div class="card-header">
-                    <h2>8-Week Historical Performance <span>(WoW Comparison)</span></h2>
-                </div>
-                <div class="card-content" style="padding: 20px; height: 350px;">
-                    <canvas id="historicalChart"></canvas>
-                </div>
-            </section>
-            
-            <!-- Daily Projected Chart -->
-            <section class="card" style="flex: 1;">
-                <div class="card-header">
-                    <h2>Current Shift Pacing <span>(Last 7 Days + Today Extrapolated)</span></h2>
-                </div>
-                <div class="card-content" style="padding: 20px; height: 350px;">
-                    <canvas id="dailyPacingChart"></canvas>
-                </div>
-            </section>
-        </div>
-    </div>
-</details>
-
-<!-- ROUTE SECTION REMOVED FOR HUB BOARD -->
-
-<!-- SECT 4: FACILITY THROUGHPUT -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Facility Inside Operations</h3>
-            <span class="section-desc">Processing output mapped against active payroll and agency labor hours.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <div class="middle-row" style="display: grid; grid-template-columns: 1fr; margin-bottom: 20px;">
-            <section class="card product-view">
-                <div class="card-header">
-                    <h2>Hub Processing Operations <span>(PPH Breakdown)</span></h2>
-                </div>
-                <div class="card-content table-responsive" id="view-eff-hub" style="min-height: 250px;"></div>
-            </section>
-        </div>
-    </div>
-</details>
-
-<!-- SECT 5: LINEHAUL UTILIZATION -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Mid-Mile Network Capacity</h3>
-            <span class="section-desc">Linehaul Utilization (LU%) capacities across the core Hub-to-Hub transit axes.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <section class="card span-full heatmap-view">
-            <div class="card-header">
-                <h2>Network Topology Flow Pipelines <span>(Active Hub-to-Hub Volume mapped with LU% load limits)</span></h2>
             </div>
-            <div class="card-content" id="view-eff-sankey" style="overflow: hidden; padding: 20px 0; min-height: 400px;"></div>
-        </section>
-    </div>
-</details>
+            
+            <!-- BOTTOM ROW -->
+            <div style="display:grid; grid-template-columns: 1fr 2.5fr 2.5fr; gap:20px; height:600px;">
+                
+                <div class="panel card" style="display:flex; flex-direction:column; overflow:hidden;">
+                    <div id="view-eff-country-table" class="card-content table-responsive" style="flex:1; padding:0; overflow-y:auto;"></div>
+                </div>
+                
+                <div class="panel card" style="display:flex; flex-direction:column; overflow:hidden;">
+                    <div class="card-header">
+                        <h2>Hub Plot - PPH vs. Total Shipments</h2>
+                    </div>
+                    <div style="flex:1; padding: 20px; position:relative;">
+                        <canvas id="hubScatterChart"></canvas>
+                    </div>
+                </div>
 
-</main>
+                <div class="panel card" style="display:flex; flex-direction:column; overflow:hidden;">
+                    <div id="view-eff-hub-table" class="card-content table-responsive" style="flex:1; padding:0; overflow-y:auto;"></div>
+                </div>
+                
+            </div>
+
+        </main>
         
         <footer class="dashboard-footer">
             <!-- V38 Role Selector -->
@@ -317,6 +262,7 @@
 
     <!-- Application Logic -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://unpkg.com/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
     <script src="efficiency.js?v=001"></script>

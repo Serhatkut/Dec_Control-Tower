@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Global Operations | DHL eCommerce Control Tower</title>
+    <title>Hub & Network Efficiency | DHL eCommerce Control Tower</title>
     <script>
         function toggleTheme() {
             const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
@@ -22,6 +22,7 @@
     </script>
     <meta name="description" content="Operational Dashboard tracking parcel network real-time events, SLA/OTP, and stangation.">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -164,7 +165,7 @@
                     <div style="display: flex; gap: 8px;">
                         <button id="inboxBtn" class="btn-alert" onclick="showTicketInbox()" style="background-color: #ff6600; color: #111; cursor: pointer; box-shadow: 0 0 10px rgba(255,102,0,0.5); display:flex; align-items:center; justify-content:center; gap:6px;"><img src="assets/icons/ticket_rgb_red.png" style="height:16px; filter:brightness(0);"> Inbox (0)</button>
                         <button id="themeBtn" class="btn-info" onclick="toggleTheme()" title="Toggle Premium Dark Mode" style="display:flex; align-items:center; justify-content:center; gap:6px;">🌙 Theme</button>
-                        <button id="helpBtn" class="btn-info" onclick="showHelpModal()" title="How to use this dashboard and read alerts" style="display:flex; align-items:center; justify-content:center; gap:6px;"><img src="assets/icons/document.png" style="height:16px; filter:brightness(0) invert(1);"> Help</button>
+                        <button id="helpBtn" class="btn-info" onclick="showHelpModal()" title="How to use this dashboard" style="display:flex; align-items:center; justify-content:center; gap:6px;"><img src="assets/icons/document.png" style="height:16px; filter:brightness(0) invert(1);"> Help</button>
                     </div>
                 </div>
             </div>
@@ -180,183 +181,38 @@
         </div> <!-- END STICKY NAVBAR WRAPPER -->
 
         <!-- DASHBOARD GRID -->
-        <main class="dashboard-grid">
+        <main class="dashboard-grid" style="padding: 20px;">
             
-            <!-- SECT 1 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Executive KPI Performance</h3>
-            <span class="section-desc">High-level metrics tracking core operations and transit service levels.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- KPI CARDS -->
-            <div class="kpi-grid span-full" id="kpi-container"></div>
-
-                </div>
-</details>
-
-<!-- SECT 2 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>End-to-End Pipeline Visibility</h3>
-            <span class="section-desc">Current parcel distribution across operational phases and aging scan stagnation.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- VIEW 1: Pipeline Matrix -->
-            <section class="card span-full pipeline-view">
-                <div class="card-header">
-                    <h2>Pipeline Matrix <span>(Distinct Parcels by Phase & EDD)</span></h2>
-                </div>
-                <div class="card-content table-responsive" id="view1-container">
-                    <!-- Table injected by JS -->
-                </div>
-            </section>
-
-            <!-- VIEW 2: Scan Stagnation Table (Horizontal) -->
-            <section class="card span-full stagnation-view">
-                <div class="card-header">
-                    <h2>Scan Stagnation <span>(Time since last physical event)</span></h2>
-                </div>
-                <div class="card-content table-responsive" id="view2-container">
-                </div>
-            </section>
-
-                </div>
-</details>
-
-<!-- SECT 3 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Operations & Performance Breakdowns</h3>
-            <span class="section-desc">Detailed tracking of network exceptions, customer-level performance, and product SLAs.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- Middle Row Data -->
-            <div class="middle-row">
-
-
-                <!-- VIEW 4: Customer Performance -->
-                <!-- VIEW 10: Exceptions -->
-                <section class="card exception-view">
+            <div class="kpi-grid" id="kpi-container-linehaul" style="grid-template-columns: repeat(3, 1fr); gap:20px; display:grid;"></div>
+            
+            <div class="efficiency-grid" style="display: grid; grid-template-columns: 1fr 1.2fr; gap: 20px; margin-top: 20px;">
+                <div class="panel card" style="display:flex; flex-direction:column; justify-content:flex-start;">
                     <div class="card-header">
-                        <h2>Exception Types <span>(Volume & BLG%)</span></h2>
+                        <h2>Top N Routes by LU%</h2>
                     </div>
-                    <div class="card-content table-responsive" id="view10-container">
+                    <div id="view-eff-sankey" style="width:100%; height:800px; overflow:hidden; display:flex; justify-content:center; align-items:center;"></div>
+                </div>
+                
+                <div style="display:flex; flex-direction:column; gap:20px;">
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:20px;">
+                        <div class="panel card">
+                            <div class="card-header"><h2>Origin Site</h2></div>
+                            <div id="view-eff-origin-table" class="card-content table-responsive"></div>
+                        </div>
+                        <div class="panel card">
+                            <div class="card-header"><h2>Destination Site</h2></div>
+                            <div id="view-eff-dest-table" class="card-content table-responsive"></div>
+                        </div>
                     </div>
-                </section>
-
-                <!-- VIEW 4: Customer Performance -->
-                <section class="card customer-view">
-                    <div class="card-header">
-                        <h2>Customer Performance <span>(Volume & BLG%)</span></h2>
+                    
+                    <div class="panel card">
+                        <div class="card-header"><h2>Route Performance Details</h2></div>
+                        <div id="view-eff-route-table" class="card-content table-responsive"></div>
                     </div>
-                    <div class="card-content table-responsive" id="view4-container">
-                    </div>
-                </section>
-
-                <!-- VIEW 5: Product & SLA Table -->
-                <section class="card product-view">
-                    <div class="card-header">
-                        <h2>Product & SLA Tracker <span>(Volume & BLG%)</span></h2>
-                    </div>
-                    <div class="card-content table-responsive" id="view5-container">
-                    </div>
-                </section>
+                </div>
             </div>
 
-                </div>
-</details>
-
-<!-- SECT 4 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Network Topology & Volume Distribution</h3>
-            <span class="section-desc">Physical network flows between Origin and Destination Service Centers.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- VIEW 9: Sankey Route Top 10 -->
-            <section class="card span-full heatmap-view">
-                <div class="card-header">
-                    <h2>Network Topology Flow Pipelines <span>(Origin to Destination Network Topology)</span></h2>
-                </div>
-                <div class="card-content" id="view9-container" style="overflow: hidden; padding: 20px 0;">
-                </div>
-            </section>
-
-            <!-- VIEW 3: Origin-Destination Matrix -->
-            <section class="card span-full heatmap-view">
-                <div class="card-header">
-                    <h2>Origin to Destination Network Flow <span>(Parcel Volume)</span></h2>
-                </div>
-                <div class="card-content table-responsive heatmap-container" id="view3-container">
-                </div>
-            </section>
-
-                </div>
-</details>
-
-<!-- SECT 5 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Facility Operations</h3>
-            <span class="section-desc">Service Center level volumes tracking origin and destination pipelines.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- VIEW 7 & 8: Service Centers -->
-            <div class="middle-row" style="grid-template-columns: repeat(2, 1fr);">
-                <section class="card sc-origin-view">
-                    <div class="card-header">
-                        <h2>Origin Service Centers <span>(Volume)</span></h2>
-                    </div>
-                    <div class="card-content table-responsive" id="view7-container"></div>
-                </section>
-
-                <section class="card sc-dest-view">
-                    <div class="card-header">
-                        <h2>Destination Service Centers <span>(Volume)</span></h2>
-                    </div>
-                    <div class="card-content table-responsive" id="view8-container"></div>
-                </section>
-            </div>
-    </div>
-</details>
-
-<!-- SECT 6 -->
-<details class="dashboard-section" open>
-    <summary class="section-title">
-        <div class="section-title-text">
-            <h3>Shipment Details</h3>
-            <span class="section-desc">Horizontal lifecycle execution pipelines to visualize flow.</span>
-        </div>
-        <span class="chevron">▼</span>
-    </summary>
-    <div class="section-content">
-        <!-- VIEW 6: Shipment Lifecycle Details -->
-            <section class="card span-full details-view">
-                <div class="card-header">
-                    <h2>Shipment Lifecycle Details <span>(Showing top 100 filtered records, horizontally aligned with stages)</span></h2>
-                </div>
-                <div class="card-content table-responsive" id="view6-container">
-                </div>
-            </section>
-    </div>
-</details>
-</main>
+        </main>
         
         <footer class="dashboard-footer">
             <!-- V38 Role Selector -->
@@ -399,6 +255,10 @@
     </div>
 
     <!-- Application Logic -->
-    <script src="app.js?v=1708"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+    <script src="https://unpkg.com/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
+    <script src="efficiency.js?v=001"></script>
 </body>
 </html>

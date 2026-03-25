@@ -23,7 +23,7 @@ const PHASE_ICONS = {
 const EDD_BUCKETS_ORDER = ["s4+ or more", "-3", "-2", "Yesterday", "Today", "Tomorrow", "+2", "+3", "4+ or more"];
 const SCAN_AGING_ORDER_DAYS = ["Today", "Yesterday", "D-2", "D-3", "D-4", "D-5+"]; 
 
-const START_PARCEL_COUNT = 8000;
+const START_PARCEL_COUNT = 14000;
 let shipments = [];
 let state = { filterScope: 'All', filters: {}, timer: 120, lastUpdated: new Date(), role: 'admin', roleEntity: null, roleDirection: 'both' };
 
@@ -72,51 +72,81 @@ function generateShipment() {
         ctd_hours = randomChoice([80, 100, 120, 150]);
     }
 
-    // Force global KPIs dynamically (Target ~ 95% OTD)
-    const failsOtd = Math.random() > 0.99;
-    if (failsOtd) {
-        if (ctd_hours <= sla_hours) ctd_hours = sla_hours + randomInt(12, 48);
-    } else {
-        if (ctd_hours > sla_hours) ctd_hours = sla_hours - randomInt(2, 24);
-    }
-
+    // -- SLA FUNNEL PHYSICS --
     const now = Date.now();
-    const isPending = Math.random() < 0.40; 
-    const isException = Math.random() < 0.05; // 5% of Pending
+    const todayMidnight = getMidnight(now);
     
-    let manifested_time, edd_timestamp, current_phase;
+    // 1. Force Historical Volume and Steady State Distribution
+    let pt = Math.random(); 
     let computedEddOffsetDays = 0;
-
-    if (!isPending) {
-        let delivered_time = now - (Math.random() * 14 * 86400000);
-        manifested_time = delivered_time - (ctd_hours * 3600000);
-        edd_timestamp = manifested_time + (sla_hours * 3600000);
-    } else {
-        let pt = Math.random(); 
-        if (pt < 0.45) computedEddOffsetDays = 0; 
-        else if (pt < 0.70) computedEddOffsetDays = 1; 
-        else if (pt < 0.90) computedEddOffsetDays = 2; 
-        else if (pt < 0.98) computedEddOffsetDays = randomInt(3, 8); // Future volume
-        else computedEddOffsetDays = randomInt(-3, -1); // Past volume (Only 2% of Pending)
-        
-        const todayMidnight = getMidnight(now);
-        // Anchor EDD strictly between 8 AM and 8 PM of the targeted day to prevent midnight spillover
-        let eddH = randomInt(8, 20);
-        edd_timestamp = todayMidnight + (computedEddOffsetDays * 86400000) + eddH*3600000;
-        
-        // Subdue massive artificial backlog spikes by shifting today's past-due SLA targets out into the remaining shift
-        if (computedEddOffsetDays === 0 && edd_timestamp < now) {
-            if (Math.random() < 0.85) { // 85% of early EDDs get pushed out, leaving ~15% to accumulate organically as backlog
-                edd_timestamp = now + randomInt(1, 6) * 3600000;
-            }
-        }
-        
-        manifested_time = edd_timestamp - (sla_hours * 3600000);
-        if (manifested_time > now) {
-            let diff = manifested_time - now + randomInt(3600000, 10800000);
-            manifested_time -= diff; // Only shift manifestation early, preserve structural EDD bucket
-        }
+    if (pt < 0.32) computedEddOffsetDays = randomInt(-10, -4); // s4+ (~4500)
+    else if (pt < 0.42) computedEddOffsetDays = -3; // ~1400
+    else if (pt < 0.52) computedEddOffsetDays = -2; // ~1400
+    else if (pt < 0.62) computedEddOffsetDays = -1; // ~1400
+    else if (pt < 0.72) computedEddOffsetDays = 0;  // Today ~1400
+    else if (pt < 0.82) computedEddOffsetDays = 1;  // Tomorrow ~1400
+    else if (pt < 0.92) computedEddOffsetDays = 2;  // +2 Days ~1400
+    else if (pt < 0.98) computedEddOffsetDays = 3;  // +3 Days ~840
+    else computedEddOffsetDays = randomInt(4, 7);   // Future ~280
+    
+    // Anchor EDD strictly between 8 AM and 8 PM
+    let eddH = randomInt(8, 20);
+    let edd_timestamp = todayMidnight + (computedEddOffsetDays * 86400000) + (eddH * 3600000);
+    let manifested_time = edd_timestamp - (sla_hours * 3600000);
+    
+    // 2. Map Operational Physics (Progress) to the SLA Funnel Curve
+    let progress;
+    let r = Math.random();
+    if (computedEddOffsetDays < 0) { // Historical Buckets
+        if (r < 0.88) progress = 1.0; // 88% Successfully Delivered
+        else if (r < 0.92) progress = 0.86; // Backlog in Dest SC
+        else if (r < 0.95) progress = 0.75; // Backlog in Dest Hub
+        else if (r < 0.98) progress = 0.40; // Backlog in Linehaul
+        else progress = 0.15; // Stuck at Origin
+    } else if (computedEddOffsetDays === 0) { // Today's Pipeline
+        if (r < 0.20) progress = 1.0; // 20% Delivered already
+        else if (r < 0.80) progress = 0.92; // 60% Out For Delivery
+        else if (r < 0.90) progress = 0.86; // 10% Processing at Last Mile SC
+        else progress = 0.40; // 10% Still In Transit
+    } else if (computedEddOffsetDays === 1) { // Tomorrow's Forward Intake
+        if (r < 0.60) progress = 0.0; // 60% freshly Manifested
+        else if (r < 0.85) progress = 0.05; // 25% Picked Up
+        else if (r < 0.95) progress = 0.40; // 10% In Linehaul transit
+        else progress = 0.75; // 5% Arrived early at Dest Hub
+    } else { // +2 Days and beyond
+        if (r < 0.80) progress = 0.0; // 80% Manifest pre-intake
+        else if (r < 0.95) progress = 0.05; // 15% Picked up
+        else progress = 0.15; // 5% Entering Origin Hub
     }
+    
+    // Add micro-drifts for organic data scatter within phases
+    if (progress < 1.0 && progress > 0.0) progress += (Math.random() * 0.04 - 0.02); 
+    if (progress < 0) progress = 0.01;
+    if (progress > 0.99 && progress !== 1.0) progress = 0.99;
+
+    let isPending = progress < 1.0;
+    let delivered_time = null;
+    
+    if (progress >= 1.0) {
+        // Force 96% structural OTD compliance mapping
+        if (Math.random() < 0.96) {
+            delivered_time = edd_timestamp - randomInt(1, 12) * 3600000;
+        } else {
+             // 4% failure tail
+            delivered_time = edd_timestamp + randomInt(1, 48) * 3600000;
+        }
+        if (delivered_time > now) delivered_time = now - 3600000;
+        ctd_hours = (delivered_time - manifested_time) / 3600000;
+        isPending = false;
+    } else {
+        let elapsed = now - manifested_time;
+        ctd_hours = (elapsed / progress) / 3600000;
+    }
+    
+    // 3. Exception Attribute Boolean Flag (Decoupled from physical location Phase)
+    let exProb = (computedEddOffsetDays < 0) ? (Math.random() * 0.03 + 0.05) : (computedEddOffsetDays === 0 ? (Math.random() * 0.02 + 0.03) : 0.01);
+    let has_exception = Math.random() < exProb;
+    let exception_cause = has_exception ? randomChoice(EXCEPTION_CAUSES) : null;
 
     let p_off = {};
     if (is_domestic || is_inner_eu) {
@@ -125,42 +155,11 @@ function generateShipment() {
         p_off = { 'Manifested':0, 'Pick Up':0.05, 'Origin SC':0.08, 'Origin Hub':0.12, 'Export Customs':0.15, 'Linehaul':0.20, 'Import Customs':0.75, 'Dest Hub':0.85, 'Dest SC':0.88, 'Out for Delivery':0.92, 'Delivered':1.0 };
     }
 
-    let progress = (now - manifested_time) / (ctd_hours * 3600000);
-    if (!isPending) progress = 1.0;
-    
-    if (isPending) {
-        progress += (Math.random() * 0.50 - 0.25); // Organic +/- 25% momentum drift
-        
-        if (computedEddOffsetDays < 0) { // Delayed (Past Due) Volumes
-            if (Math.random() < 0.60) {
-                progress = Math.random() * 0.85; // 60% chance of being stranded upstream (e.g., stuck in Origin, Customs, Linehaul)
-            }
-        } else if (computedEddOffsetDays >= 1) { // Future SLA Deliveries
-            if (Math.random() < 0.35) {
-                progress = Math.random() * 0.15; // 35% chance a future EDD parcel was freshly manifested regardless of SLA duration
-            }
-        }
-        if (progress < 0) progress = 0.01;
-        if (progress >= 1.0) progress = 0.99;
-    }
-
     const active_phases = TIMELINE_PHASES.filter(p => p_off[p] !== undefined);
-    current_phase = active_phases[0];
+    let current_phase = active_phases[0];
     for (let p of active_phases) { if (progress >= p_off[p]) current_phase = p; }
 
-    let exception_cause = null; let failed_phase = null;
-    if (isException && isPending) {
-        current_phase = 'Exception';
-        exception_cause = randomChoice(EXCEPTION_CAUSES);
-        if (['Customer Not Home', 'Bad Address'].includes(exception_cause)) failed_phase = 'Out for Delivery';
-        else if (exception_cause === 'Pick up not successful') failed_phase = 'Manifested';
-        else if (['Weather Delay', 'Network Delay'].includes(exception_cause)) failed_phase = randomChoice(['Pick Up', 'Origin Hub', 'Linehaul', 'Dest Hub']);
-        else if (['Customs Hold'].includes(exception_cause)) failed_phase = is_cross_border ? randomChoice(['Export Customs', 'Import Customs']) : 'Linehaul';
-        else failed_phase = 'Linehaul';
-    }
-
-    let targetPhase = current_phase === 'Exception' ? failed_phase : current_phase;
-    let targetIdx = active_phases.indexOf(targetPhase);
+    let targetIdx = active_phases.indexOf(current_phase);
     if (targetIdx === -1) targetIdx = active_phases.length - 1;
 
     let scan_history = {};
@@ -183,12 +182,12 @@ function generateShipment() {
         last_scan_time = sim_time;
     }
 
-    // Force Exception for > 2 days physical stagnation
-    if (isPending && current_phase !== 'Exception' && current_phase !== 'Linehaul') {
+    let failed_phase = null;
+    if (isPending && !has_exception && current_phase !== 'Linehaul') {
         const hoursStagnant = (now - last_scan_time) / 3600000;
         if (hoursStagnant > 48) {
+            has_exception = true;
             failed_phase = current_phase;
-            current_phase = 'Exception';
             if (failed_phase === 'Out for Delivery') exception_cause = randomChoice(['Bad Address', 'Customer Refused', 'Damaged / Repacked']);
             else if (failed_phase === 'Dest SC' || failed_phase === 'Origin SC') exception_cause = randomChoice(['Pick up not successful', 'Volume Lost', 'Damaged in Node']);
             else if (failed_phase === 'Import Customs' || failed_phase === 'Export Customs') exception_cause = 'Customs Hold';
@@ -200,7 +199,7 @@ function generateShipment() {
         shipment_id: crypto.randomUUID(), customer_name: randomChoice(CUSTOMERS), product_type: randomChoice(PRODUCT_TYPES),
         origin_hub: origin_hub, dest_hub: dest_hub, origin_sc: origin_sc, dest_sc: dest_sc,
         current_phase: current_phase, edd_timestamp: edd_timestamp, last_scan_timestamp: last_scan_time, is_cross_border: is_cross_border,
-        exception_cause: exception_cause, failed_phase: failed_phase, scan_history: scan_history
+        exception_cause: exception_cause, failed_phase: failed_phase, scan_history: scan_history, has_exception: has_exception
     };
 }
 function initData() { 
@@ -579,28 +578,28 @@ function getShipmentKPIs(s) {
     if (destHub && delivered) stats.lmt = (delivered - destHub) / 3600000;
     
     // Diagnostic Flags (Damage, Loss, Backlog)
-    if (s.current_phase === 'Exception') {
+    if (s.has_exception) {
         const damageCauses = ['Damaged in Transit', 'Damaged / Repacked', 'Damaged in Hub', 'Damaged in Node'];
         if (damageCauses.includes(s.exception_cause)) stats.dr = true;
         if (['Volume Lost', 'Customer Claim'].includes(s.exception_cause)) stats.lr = true;
     }
     
     // Backlog: If parcel is not delivered/lost, and Current Time has breached EDD deadline
-    if (s.current_phase !== 'Delivered' && s.exception_cause !== 'Volume Lost' && s.exception_cause !== 'Customer Claim') {
+    if (s.current_phase !== 'Delivered' && !s.has_exception) {
         if (Date.now() > s.edd_timestamp) stats.blg = true;
     }
     
     // 1. SD% Failures
-    if (s.current_phase === 'Exception' && ['Damaged / Repacked', 'Damaged in Transit', 'Customer Claim'].includes(s.exception_cause)) {
+    if (s.has_exception && ['Damaged / Repacked', 'Damaged in Transit', 'Customer Claim'].includes(s.exception_cause)) {
         stats.sd = false; stats.nop = false; stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
         return stats;
     }
     
     // 2. NOP% Failures
-    if (s.current_phase === 'Exception' && ['Weather Delay', 'Customs Hold', 'Flight Delay', 'Truck Breakdown'].includes(s.exception_cause)) {
+    if (s.has_exception && ['Weather Delay', 'Customs Hold', 'Flight Delay', 'Truck Breakdown'].includes(s.exception_cause)) {
         stats.nop = false; stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
         return stats;
-    } else if (dayOffset > 0 && !['Dest SC', 'Out for Delivery', 'Delivered', 'Exception'].includes(s.current_phase)) {
+    } else if (dayOffset > 0 && !['Dest SC', 'Out for Delivery', 'Delivered'].includes(s.current_phase) && !s.has_exception) {
         stats.nop = false; stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
         return stats;
     }
@@ -612,7 +611,7 @@ function getShipmentKPIs(s) {
             stats.otd = false; stats.otsd = false; stats.expOtdScore = 0;
         }
     } else if (dayOffset > 0) {
-        const isCustomerException = s.current_phase === 'Exception' && ['Bad Address', 'Customer Not Home', 'Customer Refused', 'Access Restricted', 'Force Majeure'].includes(s.exception_cause);
+        const isCustomerException = s.has_exception && ['Bad Address', 'Customer Not Home', 'Customer Refused', 'Access Restricted', 'Force Majeure'].includes(s.exception_cause);
         if (isCustomerException) {
             const excMid = getMidnight(s.last_scan_timestamp);
             if (excMid > eddMid) { stats.otd = false; stats.otsd = false; stats.expOtdScore = 0; }
@@ -763,6 +762,10 @@ function getFilteredData() {
                 if (s.current_phase === 'Delivered') return false;
                 if (getScanGroupDay(getScanAgingBucket(s.last_scan_timestamp)) !== value) return false; 
             }
+            else if (key === 'current_phase') {
+                if (value === 'Exception') { if (!s.has_exception) return false; }
+                else { if (s.current_phase !== value) return false; }
+            }
             else if (s[key] !== value) return false;
         } return true;
     });
@@ -810,7 +813,7 @@ function renderKPICards() {
             if(kpi.dr) g.dmg++;
             if(kpi.lr) g.loss++;
             
-            if (s.current_phase !== 'Delivered' && s.current_phase !== 'Exception') {
+            if (s.current_phase !== 'Delivered' && !s.has_exception) {
                 g.blgC++;
                 if (kpi.blg) g.blgS++;
             }
@@ -856,7 +859,7 @@ function renderKPICards() {
     const ctdH = calcWow(tw.ctdHc>0?tw.ctdHs/tw.ctdHc:0, lw.ctdHc>0?lw.ctdHs/lw.ctdHc:0, true);
     const fmH = calcWow(tw.fmHc>0?tw.fmHs/tw.fmHc:0, lw.fmHc>0?lw.fmHs/lw.fmHc:0, true);
     const mmH = calcWow(tw.mmHc>0?tw.mmHs/tw.mmHc:0, lw.mmHc>0?lw.mmHs/lw.mmHc:0, true);
-    const lmH = calcWow(tw.lmHc>0?tw.lmHs/tw.lmHc:0, lw.lmHc>0?lw.lmHs/lw.lmHc:0, true);
+    const lmH = calcWow(tw.lmHc>0?tw.lmHs/lw.lmHc:0, lw.lmHc>0?lw.lmHs/lw.lmHc:0, true);
 
     const formatRate = (num) => (num * 100).toFixed(1) + "%";
 
@@ -931,9 +934,15 @@ function renderView1(data) {
     EDD_BUCKETS_ORDER.forEach(b => { rowOtd[b] = { e: 0, s: 0 }; rowCtd[b] = { c: 0, s: 0 }; });
 
     data.forEach(s => {
-        const row = getEDDBucket(s.edd_timestamp); const col = s.current_phase;
+        const row = getEDDBucket(s.edd_timestamp); 
+        const col = s.current_phase;
         matrix[row][col] = (matrix[row][col] || 0) + 1;
         colTotals[col]++; grandTotal++;
+        
+        if (s.has_exception) {
+            matrix[row]['Exception'] = (matrix[row]['Exception'] || 0) + 1;
+            colTotals['Exception']++;
+        }
 
         const stats = getShipmentOTDStats(s);
         if (stats.isEligible) { 
@@ -1179,7 +1188,7 @@ function buildAnalyticsTable(data, entityKey, entityTitle, entityArray = null) {
         if (stats.isEligible) { cd.otdEligible++; cd.otdSuccess += stats.isOtdSuccess?1:0; gOtdEligible++; gOtdSuccess += stats.isOtdSuccess?1:0; }
         if (stats.isPending) { cd.expCount++; cd.expSum += stats.expOtdScore; gExpCount++; gExpSum += stats.expOtdScore; }
         
-        if (s.current_phase !== 'Delivered' && s.current_phase !== 'Exception') {
+        if (s.current_phase !== 'Delivered' && !s.has_exception) {
             cd.blgC++; gBlgC++;
             if (kpi.blg) { cd.blgS++; gBlgS++; }
         }
@@ -1217,7 +1226,7 @@ function renderView5(data) { document.getElementById('view5-container').innerHTM
 function renderView7(data) { document.getElementById('view7-container').innerHTML = buildAnalyticsTable(data, 'origin_sc', 'Origin SC'); }
 function renderView8(data) { document.getElementById('view8-container').innerHTML = buildAnalyticsTable(data, 'dest_sc', 'Dest SC'); }
 
-function renderView10(data) { const excs = data.filter(s => s.current_phase === 'Exception'); document.getElementById('view10-container').innerHTML = buildAnalyticsTable(excs, 'exception_cause', 'Exception'); }
+function renderView10(data) { const excs = data.filter(s => s.has_exception); document.getElementById('view10-container').innerHTML = buildAnalyticsTable(excs, 'exception_cause', 'Exception'); }
 
 function renderView9(data) {
     const container = document.getElementById('view9-container');
@@ -1414,7 +1423,7 @@ function renderView6(data) {
         trackNodes.forEach((nodeName, nIdx) => {
             const isLast = nIdx === trackNodes.length - 1;
             const hasScan = s.scan_history[nodeName];
-            const isFailurePoint = s.current_phase === 'Exception' && s.failed_phase === nodeName;
+            const isFailurePoint = s.has_exception && s.failed_phase === nodeName;
             
             let statusIcon = '<div style="width:18px;height:18px;border-radius:50%;background:#e0e0e0;border:2px solid #fff;box-shadow:0 0 0 1px #ccc;"></div>'; // Pending
             let textColor = '#888';

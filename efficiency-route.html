@@ -22,6 +22,7 @@
     </script>
     <meta name="description" content="Operational Dashboard tracking parcel network real-time events, SLA/OTP, and stangation.">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -135,9 +136,10 @@
                      </h1>
                 </div>
                 <nav class="main-nav" style="margin-left: 20px; display: flex; border-left: 1px solid var(--border-color); padding-left: 20px; gap: 10px; align-items: center;">
-                    <a href="index.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; transition: background 0.2s;">Operations & E2E</a>
-                    <a href="efficiency-hub.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; transition: background 0.2s;">Hub & Network Efficiency</a>
-                    <a href="efficiency-route.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--dhl-red); color: white; font-weight: 700; font-size: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Route & Driver Efficiency</a>
+                    <a href="index.html" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--dhl-red); color: white; font-weight: 700; font-size: 14px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">Reliable OPS & Executive</a>
+                    <a href="#" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; opacity: 0.4; cursor: not-allowed; pointer-events: none;" title="Temporarily Disabled">Hub Productivity</a>
+                    <a href="#" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; opacity: 0.4; cursor: not-allowed; pointer-events: none;" title="Temporarily Disabled">Line Haul Utilization</a>
+                    <a href="#" style="text-decoration: none; padding: 6px 16px; border-radius: 20px; background: var(--hover-bg); color: var(--text-primary); font-weight: 600; font-size: 14px; opacity: 0.4; cursor: not-allowed; pointer-events: none;" title="Temporarily Disabled">Route & Driver Efficiency</a>
                 </nav>
                 <!-- Breadcrumbs for active filters -->
                 <div class="breadcrumbs" id="breadcrumbs" style="margin-left: 20px;"></div>
@@ -231,7 +233,28 @@
     </div>
 </details>
 
-<!-- SECT 3: DELIVERY EFFICIENCY -->
+<!-- SECT 3: DELIVERY FLEET GEOFENCING -->
+<details class="dashboard-section" open>
+    <summary class="section-title">
+        <div class="section-title-text">
+            <h3>Geospatial Service Routing</h3>
+            <span class="section-desc">Live territorial overlay tracking localized Delivery Zones and physical drop-off cluster density mapping.</span>
+        </div>
+        <span class="chevron">▼</span>
+    </summary>
+    <div class="section-content">
+        <section class="card span-full heatmap-view">
+            <div class="card-header">
+                <h2>Real-Time Driver Territories <span>(Madrid Central Simulation)</span></h2>
+            </div>
+            <div class="card-content" style="padding: 0;">
+                <div id="route-map" style="height: 550px; width: 100%; border-radius: 0 0 8px 8px;"></div>
+            </div>
+        </section>
+    </div>
+</details>
+
+<!-- SECT 4: DELIVERY EFFICIENCY TABLES -->
 <details class="dashboard-section" open>
     <summary class="section-title">
         <div class="section-title-text">
@@ -336,6 +359,7 @@
 
     <!-- Application Logic -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <script src="https://d3js.org/d3.v7.min.js"></script>
     <script src="https://unpkg.com/d3-sankey@0.12.3/dist/d3-sankey.min.js"></script>
     <script src="efficiency.js?v=001"></script>
