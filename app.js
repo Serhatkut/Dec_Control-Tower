@@ -782,7 +782,10 @@ function renderBreadcrumbs() {
         tag.innerText = `${displayKey}: ${val}`; tag.onclick = () => setFilter(key, val); bcContainer.appendChild(tag);
     }
     const resetBtn = document.getElementById('resetFiltersBtn');
-    resetBtn.style.display = (Object.keys(state.filters).length > 0 || state.filterScope !== 'All') ? 'inline-block' : 'none';
+    const filterDrawer = document.getElementById('filterDrawer');
+    const hasFilters = (Object.keys(state.filters).length > 0 || state.filterScope !== 'All');
+    if (resetBtn) resetBtn.style.display = hasFilters ? 'inline-block' : 'none';
+    if (filterDrawer) filterDrawer.style.display = hasFilters ? 'flex' : 'none';
 }
 
 // --- KPIs & Sparklines ---

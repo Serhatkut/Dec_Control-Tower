@@ -46,11 +46,14 @@ function updateBreadcrumbs() {
     b.innerHTML = html;
     
     const resetBtn = document.getElementById('resetFiltersBtn');
+    const filterDrawer = document.getElementById('filterDrawer');
     if (resetBtn) {
         if (activeHubFilter || activeRouteFilter) {
             resetBtn.style.display = 'inline-block';
+            if(filterDrawer) filterDrawer.style.display = 'flex';
         } else {
             resetBtn.style.display = 'none';
+            if(filterDrawer) filterDrawer.style.display = 'none';
         }
     }
 }
@@ -58,7 +61,10 @@ function updateBreadcrumbs() {
 function clearFilters() {
     activeHubFilter = null;
     activeRouteFilter = null;
-    document.getElementById('resetFiltersBtn').style.display = 'none';
+    const resetBtn = document.getElementById('resetFiltersBtn');
+    if(resetBtn) resetBtn.style.display = 'none';
+    const filterDrawer = document.getElementById('filterDrawer');
+    if (filterDrawer) filterDrawer.style.display = 'none';
     const b = document.getElementById('breadcrumbs');
     if (b) b.innerHTML = '';
     renderCharts();
